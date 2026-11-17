@@ -212,19 +212,24 @@ final class SpecTests: XCTestCase {
             ReportFile(path: "/desk/b.mp4", bytes: 10, modifiedAt: date(2026, 11, 10), indexedAt: date(2026, 11, 12), contentClass: "finalVideo", publishStatus: "pending", inHistory: false),
             ReportFile(path: "/desk/frame.exr", bytes: 900, modifiedAt: date(2026, 11, 16), indexedAt: nil, contentClass: "renderFrame", publishStatus: "", inHistory: false),
             ReportFile(path: "/desk/产品/FCCV1/历史版本/old.dmg", bytes: 400, modifiedAt: date(2026, 1, 1), indexedAt: nil, contentClass: "installer", publishStatus: "", inHistory: true),
+            ReportFile(path: "/desk/旧稿.mp4", bytes: 8, modifiedAt: date(2026, 10, 1), indexedAt: date(2026, 11, 16), contentClass: "finalVideo", publishStatus: "", inHistory: false),
         ]
         let digest = WeeklyReports.digest(files, now: date(2026, 11, 16), calendar: calendar)
         XCTAssertEqual(digest.produced, 2)
-        XCTAssertEqual(digest.archived, 1)
+        XCTAssertEqual(digest.archived, 2)
         XCTAssertEqual(digest.published, 1)
         XCTAssertEqual(digest.pending, 1)
         XCTAssertTrue(digest.markdown.contains("本周产出：2"))
+        XCTAssertTrue(digest.markdown.contains("修改时间在本周"))
+        XCTAssertTrue(digest.markdown.contains("本周归档：2"))
+        XCTAssertTrue(digest.markdown.contains("本周放进库里的"))
         let space = WeeklyReports.space(files)
         XCTAssertEqual(space.largest.first?.path, "/desk/frame.exr")
         XCTAssertEqual(space.reclaimableBytes, 1300)
         let disk = MemoryDisk()
         let path = try WeeklyReports.write(digest, desktop: "/desk", now: date(2026, 11, 16), store: disk)
-        XCTAssertTrue(path.contains("产物整理器报告/2026-11-16.md"))
+        XCTAssertTrue(path.contains("素材整理器报告/2026-11-16.md"))
+        XCTAssertTrue(digest.markdown.contains("素材整理器周报"))
         XCTAssertTrue(disk.exists(path))
         XCTAssertTrue(PublishReminder.isStale(status: "pending", since: date(2026, 10, 1), now: date(2026, 11, 16), days: 14))
         XCTAssertFalse(PublishReminder.isStale(status: "published", since: date(2026, 10, 1), now: date(2026, 11, 16), days: 14))
@@ -246,6 +251,7 @@ final class SpecTests: XCTestCase {
     }
 
     func testProjectTagsSkipGenericFoldersUnlessKnownOrRoot() throws {
+        XCTAssertEqual(ProjectTags.builtins, ["FCCV1", "案头", "YUUKI"])
         XCTAssertEqual(ProjectTags.detect(path: "/tmp/chanwu_fixture/image_1234.png", name: "image_1234.png", extra: []), "")
         XCTAssertEqual(ProjectTags.detect(path: "/Users/me/Downloads/sub/output/image_1234.png", name: "image_1234.png", extra: []), "")
         XCTAssertEqual(ProjectTags.detect(path: "/Users/me/Desktop/src/dist/untitled/a.png", name: "a.png", extra: []), "")
@@ -388,12 +394,12 @@ final class SpecTests: XCTestCase {
         XCTAssertEqual(printed.exitCode, 0)
         XCTAssertTrue(printed.stdout.contains("本周产出：3"))
         XCTAssertTrue(printed.stdout.contains("仍待发布：1"))
-        XCTAssertFalse(disk.exists("/desk/产物整理器报告/2026-11-16.md"))
+        XCTAssertFalse(disk.exists("/desk/素材整理器报告/2026-11-16.md"))
 
         let written = CLIRunner.run(.report(ReportFlags(library: "/desk", desktop: "/desk", write: true)), store: disk, now: when)
         XCTAssertEqual(written.exitCode, 0, written.stderr)
-        XCTAssertTrue(written.stdout.contains("已写入 /desk/产物整理器报告/2026-11-16.md"))
-        XCTAssertTrue(disk.exists("/desk/产物整理器报告/2026-11-16.md"))
+        XCTAssertTrue(written.stdout.contains("已写入 /desk/素材整理器报告/2026-11-16.md"))
+        XCTAssertTrue(disk.exists("/desk/素材整理器报告/2026-11-16.md"))
 
         let parsed = try CLIParser.parse(["pack", "--library", "/desk", "--project", "FCCV1", "--output", "/out/a.zip"])
         guard case .pack(let packFlags) = parsed else { return XCTFail() }
@@ -445,6 +451,251 @@ final class SpecTests: XCTestCase {
         var config = DeskConfig.standard()
         config.rules = rules
         return config
+    }
+
+    func testSearchFilterKeepsOnlyMatchingRecords() {
+        let fccv = archiveRecord(id: "a", name: "封面.png", tag: "FCCV1", content: "aiImage", kind: "image", status: "pending")
+        let desk = archiveRecord(id: "b", name: "shot.png", tag: "案头", content: "screenshot", kind: "image", status: "")
+        let video = archiveRecord(id: "c", name: "clip.mp4", tag: "YUUKI", content: "finalVideo", kind: "video", status: "published")
+        let all = [fccv, desk, video]
+        XCTAssertEqual(ArchiveQuery.filter(all, query: "").map(\.id), ["a", "b", "c"])
+        XCTAssertEqual(ArchiveQuery.filter(all, query: "FCCV1").map(\.id), ["a"])
+        XCTAssertEqual(ArchiveQuery.filter(all, query: "fccv1").map(\.id), ["a"])
+        XCTAssertEqual(ArchiveQuery.filter(all, query: "截图").map(\.id), ["b"])
+        XCTAssertEqual(ArchiveQuery.filter(all, query: "待发布").map(\.id), ["a"])
+        XCTAssertTrue(ArchiveQuery.filter(all, query: "不存在的词").isEmpty)
+        XCTAssertEqual(ArchiveLabels.contentClass("archive"), "压缩包")
+        XCTAssertEqual(ArchiveLabels.contentClass("aiImage"), "图片")
+        XCTAssertEqual(ArchiveLabels.contentClass("screenshot"), "截图")
+        XCTAssertEqual(ArchiveLabels.publishStatus("pending"), "待发布")
+        XCTAssertEqual(ArchiveLabels.kind("image"), "图片")
+        XCTAssertNotEqual(ArchiveLabels.contentClass("archive"), "archive")
+    }
+
+    func testTodayArchiveIgnoresUndoneRuns() {
+        let now = date(2026, 11, 16, 8, 27)
+        let applied = runRecord(id: "move-1", mode: .applied, undoOf: nil, moved: 3, bytes: 100, when: now)
+        let undo = runRecord(id: "undo-1", mode: .undo, undoOf: "move-1", moved: 0, bytes: 0, when: now)
+        let kept = runRecord(id: "move-2", mode: .applied, undoOf: nil, moved: 2, bytes: 40, when: now)
+        let yesterday = runRecord(id: "old", mode: .applied, undoOf: nil, moved: 9, bytes: 9, when: date(2026, 11, 15, 8, 0))
+        let stats = RunStats.movedToday(runs: [applied, undo, kept, yesterday], now: now)
+        XCTAssertEqual(stats.count, 2)
+        XCTAssertEqual(stats.bytes, 80)
+        XCTAssertEqual(RunStats.movedToday(runs: [applied], now: now).count, 3)
+    }
+
+    func testLowMarkStartsUnchecked() throws {
+        let low = selectionItem(id: "messy", slot: DeskSlot.finishedImage.rawValue, confidence: 0.62, content: "aiImage")
+        let high = selectionItem(id: "sure", slot: DeskSlot.finishedImage.rawValue, confidence: 0.84, content: "aiImage")
+        XCTAssertFalse(PreviewSelection.initialIDs([low]).contains("messy"))
+        XCTAssertTrue(PreviewSelection.initialIDs([low, high]).contains("sure"))
+        XCTAssertFalse(PreviewSelection.initialIDs([low, high]).contains("messy"))
+
+        let disk = MemoryDisk()
+        let when = date(2026, 11, 16)
+        try disk.writeFile("/inbox/image_1234.png", data: Data("png".utf8), modified: when)
+        var preferences = AppPreferences.fresh()
+        preferences.libraryRoot = "/desk"
+        preferences.scanRoots = ["/inbox"]
+        let plan = Organizer(store: disk).scanAndPlan(preferences: preferences, state: .fresh(now: when), now: when, desk: .standard())
+        let item = try XCTUnwrap(plan.items.first { $0.meta?.originalName == "image_1234.png" })
+        XCTAssertLessThan(item.confidence, PreviewSelection.lowConfidence)
+        XCTAssertEqual(item.disposition, .proposed)
+        XCTAssertFalse(plan.preselectedIDs.contains(item.id))
+        XCTAssertEqual(ByteFormat.string(bytes: 1_048_576), "1.0 MB")
+        XCTAssertEqual(ByteFormat.string(bytes: 1536), "1.5 KB")
+    }
+
+    func testUndoDropsOnlyFoldersTheMoveCreated() throws {
+        let disk = MemoryDisk()
+        let when = date(2026, 11, 16, 8, 27)
+        try disk.makeDirectory("/disk/inbox")
+        try disk.makeDirectory("/disk/lib/社媒")
+        try disk.writeFile("/disk/lib/社媒/keep.txt", data: Data("keep".utf8), modified: when)
+        try disk.writeFile("/disk/inbox/clip.mp4", data: Data("local".utf8), modified: when)
+        let organizer = Organizer(store: disk)
+        var preferences = AppPreferences.fresh()
+        preferences.libraryRoot = "/disk/lib"
+        preferences.scanRoots = ["/disk/inbox"]
+        var state = LibraryState.fresh(now: when)
+        state.hasCompletedDryRun = true
+        let plan = organizer.scanAndPlan(preferences: preferences, state: state, now: when, desk: .standard())
+        let clip = try XCTUnwrap(plan.items.first { $0.sourcePath.hasSuffix("clip.mp4") })
+        let record = try organizer.execute(
+            plan: plan,
+            request: ExecuteRequest.make(confirmed: true, planFingerprint: plan.fingerprint, selectedIDs: [clip.id], intendToApply: true, moveOnly: true),
+            state: &state,
+            now: when,
+            runID: "C381-folder"
+        )
+        let moved = try XCTUnwrap(record.operations.first { $0.action == .moved })
+        let created = try XCTUnwrap(moved.createdDirectories)
+        XCTAssertFalse(created.isEmpty)
+        XCTAssertFalse(created.contains("/disk/lib/社媒"))
+        for directory in created {
+            XCTAssertTrue(disk.exists(directory), directory)
+        }
+        let undo = try organizer.undo(runID: "C381-folder", library: "/disk/lib", now: when, undoID: "undo-folder")
+        XCTAssertFalse(undo.note.contains("C381"))
+        XCTAssertFalse(undo.note.contains(record.id))
+        XCTAssertTrue(undo.note.contains("1 个文件"))
+        XCTAssertTrue(undo.note.contains("11月16日"))
+        for directory in created {
+            XCTAssertFalse(disk.exists(directory), directory)
+        }
+        XCTAssertTrue(disk.exists("/disk/lib/社媒"))
+        XCTAssertEqual(disk.storedData("/disk/lib/社媒/keep.txt"), Data("keep".utf8))
+        XCTAssertEqual(disk.storedData("/disk/inbox/clip.mp4"), Data("local".utf8))
+    }
+
+    func testPendingDeleteStartsUncheckedUnlessEveryItemIsCertain() {
+        let keep = selectionItem(id: "keep", slot: DeskSlot.finishedImage.rawValue, confidence: 0.8, content: "aiImage")
+        let certain = selectionItem(id: "frame", slot: DeskSlot.pendingDelete.rawValue, confidence: 0.95, content: "renderFrame")
+        let unsure = selectionItem(id: "log", slot: DeskSlot.pendingDelete.rawValue, confidence: 0.4, content: "log")
+        XCTAssertEqual(PreviewSelection.initialIDs([keep, certain, unsure]), ["keep"])
+        XCTAssertEqual(
+            PreviewSelection.initialIDs([
+                selectionItem(id: "a", slot: DeskSlot.pendingDelete.rawValue, confidence: 0.91, content: "renderFrame"),
+                selectionItem(id: "b", slot: DeskSlot.pendingDelete.rawValue, confidence: 0.99, content: "cache"),
+            ]),
+            ["a", "b"]
+        )
+        XCTAssertTrue(PreviewSelection.initialIDs([
+            selectionItem(id: "c", slot: DeskSlot.pendingDelete.rawValue, confidence: 0.97, content: "installer"),
+        ]).isEmpty)
+        let names = DeskConfig.standard().reservedTopLevels()
+        XCTAssertTrue(names.contains(DefaultLocations.reportFolderName))
+        XCTAssertTrue(names.contains(DefaultLocations.legacyReportFolderName))
+    }
+
+    private func archiveRecord(id: String, name: String, tag: String, content: String, kind: String, status: String) -> ArchiveRecord {
+        ArchiveRecord(
+            id: id,
+            fileName: name,
+            originalName: name,
+            kind: kind,
+            projectTag: tag,
+            modifiedAt: "2026-11-16T08:27:00+08:00",
+            platform: "",
+            publishStatus: status,
+            version: "",
+            path: "/desk/\(tag)/\(name)",
+            contentClass: content,
+            publishedAt: "",
+            bytes: 12,
+            reason: ""
+        )
+    }
+
+    private func runRecord(id: String, mode: RunMode, undoOf: String?, moved: Int, bytes: Int64, when: Date) -> RunRecord {
+        let operations = (0..<moved).map { index in
+            RunOperation(
+                id: "\(id)-\(index)",
+                source: "/inbox/\(index).png",
+                destination: "/desk/\(index).png",
+                action: FileAction.moved,
+                reason: "已移动",
+                bytes: bytes,
+                sourceTool: .unknown,
+                kind: .image
+            )
+        }
+        return RunRecord(
+            schema: 1,
+            id: id,
+            startedAt: when,
+            finishedAt: when,
+            mode: mode,
+            libraryRoot: "/desk",
+            planFingerprint: "fp",
+            undoOfRunID: undoOf,
+            note: "",
+            operations: operations
+        )
+    }
+
+    private func selectionItem(id: String, slot: String, confidence: Double, content: String) -> PlannedMove {
+        PlannedMove(
+            id: id,
+            sourcePath: "/src/\(id).png",
+            destinationPath: "/desk/\(id).png",
+            fileName: "\(id).png",
+            bytes: 4,
+            modifiedAt: date(2026, 11, 16),
+            source: .unknown,
+            kind: .image,
+            confidence: confidence,
+            evidence: [],
+            disposition: .proposed,
+            reason: "测试",
+            meta: .make(originalName: "\(id).png", contentClass: content),
+            deskSlot: slot
+        )
+    }
+
+    func testUndoRoutingLeavesOtherWindowsAloneAndSearchSubtitleDropsDuplicateTag() {
+        XCTAssertEqual(UndoRouting.undo(responderCanUndo: true, windowCanUndo: false, keyWindowIsMain: true), .windowAction)
+        XCTAssertEqual(UndoRouting.undo(responderCanUndo: false, windowCanUndo: true, keyWindowIsMain: false), .windowAction)
+        XCTAssertEqual(UndoRouting.undo(responderCanUndo: false, windowCanUndo: false, keyWindowIsMain: true), .fileMove)
+        XCTAssertEqual(UndoRouting.undo(responderCanUndo: false, windowCanUndo: false, keyWindowIsMain: false), .none)
+        XCTAssertEqual(UndoRouting.redo(responderCanRedo: false, windowCanRedo: true), .windowAction)
+        XCTAssertEqual(UndoRouting.redo(responderCanRedo: false, windowCanRedo: false), .none)
+
+        XCTAssertEqual(
+            SearchRowText.subtitle(category: "产品", folder: "FCCV1", projectTag: "FCCV1", when: "11 分钟前"),
+            "产品 › FCCV1 · 11 分钟前"
+        )
+        XCTAssertEqual(
+            SearchRowText.subtitle(category: "产品", folder: "历史版本", projectTag: "FCCV1", when: ""),
+            "产品 › 历史版本 · FCCV1"
+        )
+        XCTAssertEqual(
+            SearchRowText.subtitle(category: "产品", folder: "", projectTag: "FCCV1", when: ""),
+            "产品 · FCCV1"
+        )
+    }
+
+    func testPageNotesStayOnTheirPageAndAppearanceLaunchOverride() throws {
+        var notes = PageNotes(values: ["preview": "还没有扫描"])
+        notes.set("已按确认结果移动文件", page: "preview")
+        XCTAssertEqual(notes.text(for: "preview"), "已按确认结果移动文件")
+        XCTAssertEqual(notes.text(for: "space"), "")
+        notes.set("周报已写入 桌面", page: "weekly")
+        XCTAssertEqual(notes.text(for: "weekly"), "周报已写入 桌面")
+        XCTAssertEqual(notes.text(for: "space"), "")
+        notes.set("已按确认结果移动文件。可以用这条记录撤销。", page: "preview")
+        let undone = notes.afterUndo(preview: "preview", note: "11月17日 09:00 的移动里，已把 1 个文件移回原处。")
+        XCTAssertFalse(undone.text(for: "preview").contains("可以用这条记录撤销"))
+        XCTAssertTrue(undone.text(for: "preview").contains("移回原处"))
+        XCTAssertEqual(undone.text(for: "weekly"), "周报已写入 桌面")
+        XCTAssertEqual(SidebarAnnouncement.label(title: "待分发", badge: 1, unit: "项"), "待分发，1 项")
+        XCTAssertEqual(SidebarAnnouncement.label(title: "待分发", badge: 0, unit: "项"), "待分发")
+        XCTAssertEqual(SidebarAnnouncement.label(title: "资料库", badge: 3), "资料库，3")
+
+        XCTAssertEqual(AppearanceChoice.launchOverride(arguments: ["App", "-SucaiAppearance", "dark"]), .dark)
+        XCTAssertEqual(AppearanceChoice.launchOverride(arguments: ["App", "-SucaiAppearance", "LIGHT"]), .light)
+        XCTAssertNil(AppearanceChoice.launchOverride(arguments: ["App", "-SucaiAppearance", "system"]))
+        XCTAssertNil(AppearanceChoice.launchOverride(arguments: ["App", "-SucaiAppearance"]))
+        XCTAssertNil(AppearanceChoice.launchOverride(arguments: ["App"]))
+        XCTAssertEqual(AppearanceChoice.resolve(saved: "light", arguments: ["ChanwuApp", "-SucaiAppearance", "dark"]), .dark)
+        XCTAssertEqual(AppearanceChoice.resolve(saved: "dark", arguments: ["ChanwuApp"]), .dark)
+        XCTAssertEqual(AppearanceChoice.resolve(saved: nil, arguments: []), .system)
+        XCTAssertEqual(AppearanceChoice.resolve(saved: "nope", arguments: []), .system)
+
+        XCTAssertEqual(OAuthEndpoints.callbackURL, "http://127.0.0.1:8765/callback")
+        let url = OAuthEndpoints.authorizeURL(platform: .youtube, clientID: "abc", redirect: OAuthEndpoints.callbackURL, state: "s")
+        XCTAssertTrue(url.contains("redirect_uri="))
+        XCTAssertTrue(url.contains("127.0.0.1"))
+        XCTAssertTrue(url.contains("callback"))
+
+        let encoded = try JSONEncoder().encode(AppPreferences.fresh())
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        var stripped = object
+        stripped.removeValue(forKey: "appearance")
+        let legacy = try JSONSerialization.data(withJSONObject: stripped)
+        let decoded = try JSONDecoder().decode(AppPreferences.self, from: legacy)
+        XCTAssertNil(decoded.appearance)
+        XCTAssertEqual(decoded.schema, 1)
     }
 
     private func planned(_ path: String, original: String, tag: String, status: String = "", platform: String = "") -> PlannedMove {

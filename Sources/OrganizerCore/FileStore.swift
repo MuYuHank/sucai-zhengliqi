@@ -122,6 +122,20 @@ public final class MemoryDisk: FileStore, @unchecked Sendable {
         }
     }
 
+    public func removeEmptyDirectory(_ path: String) throws {
+        try locked {
+            let key = PathKey.normalize(path)
+            guard key != "/", let node = nodes[key], node.isDirectory, !node.isSymlink else {
+                throw OrganizerError.io("不是空文件夹：\(key)")
+            }
+            let prefix = key + "/"
+            if nodes.keys.contains(where: { $0 != key && $0.hasPrefix(prefix) }) {
+                throw OrganizerError.io("文件夹不是空的：\(key)")
+            }
+            nodes.removeValue(forKey: key)
+        }
+    }
+
     private func volume(_ path: String) -> String {
         PathKey.components(path).first ?? ""
     }
@@ -278,6 +292,18 @@ public struct LocalFileStore: FileStore, Sendable {
             try FileManager.default.createDirectory(atPath: file, withIntermediateDirectories: true)
         } catch {
             throw OrganizerError.io("无法创建文件夹 \(file)：\(error.localizedDescription)")
+        }
+    }
+
+    public func removeEmptyDirectory(_ path: String) throws {
+        let key = PathKey.normalize(path)
+        guard key != "/" else { throw OrganizerError.io("不能移除根目录") }
+        let kids = try children(of: key)
+        guard kids.isEmpty else { throw OrganizerError.io("文件夹不是空的：\(key)") }
+        do {
+            try FileManager.default.removeItem(atPath: key)
+        } catch {
+            throw OrganizerError.io("无法移除空文件夹 \(key)：\(error.localizedDescription)")
         }
     }
 

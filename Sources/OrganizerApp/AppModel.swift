@@ -2,7 +2,18 @@ import AppKit
 import Foundation
 import Observation
 import OrganizerCore
+import ServiceManagement
 import UniformTypeIdentifiers
+
+struct MoveBanner: Equatable, Identifiable {
+    var id: String
+    var record: RunRecord
+    var moved: Int
+    var copied: Int
+    var skippedVolume: Int
+    var failed: Int
+    var dry: Bool
+}
 
 struct ScanProduct: Sendable {
     var plan: MovePlan
@@ -24,9 +35,25 @@ final class AppModel {
     var plan: MovePlan?
     var catalog: Catalog
     var runs: [RunRecord]
-    var section: WorkspaceSection = .scan
+    var section: WorkspaceSection = .preview
+    private var pageNotes = PageNotes(values: [WorkspaceSection.preview.rawValue: "还没有扫描"])
+    var libraryCategory: String?
+    var libraryUsesGrid = false
+    var hiddenIDs: Set<String> = []
+    var undoBanner: MoveBanner?
+    var reportFiles: [ReportFile] = []
+    var weeklyDigest: WeeklyDigest?
+    var spaceReport = SpaceReport(largest: [], reclaimable: [], reclaimableBytes: 0)
+    var platformLinked: [String: Bool] = [:]
+    var platformSecretSaved: [String: Bool] = [:]
+    var platformSyncedAt: [String: Date] = [:]
+    var quickLookURL: URL?
     var isBusy = false
-    var status = "还没有扫描"
+    var status: String { pageNotes.text(for: section.rawValue) }
+
+    func setStatus(_ text: String, page: WorkspaceSection) {
+        pageNotes.set(text, page: page.rawValue)
+    }
     var lastError: String?
     var selectedIDs: Set<String> = []
     var pendingPaths: [String] = []
@@ -35,6 +62,7 @@ final class AppModel {
     var keychainNote: String
     var filter: PreviewFilter = .movable
     var query = ""
+    var previewQuery = ""
     var confirming = false
     var capturingHotkey = false
     var desk: DeskConfig
@@ -46,11 +74,25 @@ final class AppModel {
     var spaceSummary = ""
     var staleVideos: [ArchiveRecord] = []
     var oauthCode = ""
-    var oauthNote = "平台令牌只放钥匙串。没有令牌时可以导入 CSV 或 JSON。"
+    var oauthNote = ""
     var platformBusy = false
     var platformProgress = ""
+    var distribution: DistributionConfig
+    var recognizing = false
+    var recognitionNote = ""
+    var dispatchNote = ""
+    var recognitionQuote: RecognitionQuote?
+    /// 费用确认只挂在发起它的那个窗口上。设置和主窗口同时开着时，不再各弹一次。
+    var recognitionQuoteWindow: RecognitionQuoteWindow?
+    var sendingID: String?
+    /// 真正发送前的确认。演练不走这里。
+    var confirmingSendID: String?
+    var sessionRecipients: [KnownRecipient] = []
+    var sessionNote = ""
+    var loadingRecipients = false
 
     let homeDirectory: String
+    @ObservationIgnored private var quotedJobs: [RecognitionJob] = []
     @ObservationIgnored private var platformTask: Task<Void, Never>?
     @ObservationIgnored private var platformGeneration = 0
     private var debouncer = WatchDebouncer(window: 0.8)
@@ -79,6 +121,7 @@ final class AppModel {
         keychainNote = sealed.note
         desk = (try? DeskStore.load(home: home, store: LocalFileStore())) ?? .standard()
         listings = (try? PublishedStore.load(home: home, store: LocalFileStore())) ?? .empty()
+        distribution = (try? DistributionStore.load(home: home, store: LocalFileStore())) ?? .standard()
         refreshMenu()
         refreshReports()
     }
@@ -88,18 +131,100 @@ final class AppModel {
     }
 
     var filteredItems: [PlannedMove] {
-        guard let plan else { return [] }
+        var items = visibleItems
         switch filter {
-        case .movable: return plan.proposed
-        case .optional: return plan.optionalItems
-        case .blocked: return plan.blocked
-        case .all: return plan.items
+        case .movable: items = items.filter { $0.disposition == .proposed }
+        case .optional: items = items.filter { $0.disposition == .optional }
+        case .blocked: items = items.filter { $0.disposition == .blocked }
+        case .all: break
+        }
+        let needle = previewQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return items }
+        return items.filter { item in
+            item.fileName.localizedCaseInsensitiveContains(needle)
+                || item.sourcePath.localizedCaseInsensitiveContains(needle)
+                || item.destinationPath.localizedCaseInsensitiveContains(needle)
+                || (item.meta?.originalName.localizedCaseInsensitiveContains(needle) ?? false)
+                || (item.meta?.projectTag.localizedCaseInsensitiveContains(needle) ?? false)
+                || item.reason.localizedCaseInsensitiveContains(needle)
         }
     }
 
+    var pendingCount: Int { pendingPaths.count }
+
+    var todayArchived: Int { RunStats.movedToday(runs: runs, now: Date()).count }
+
+    var todayArchivedBytes: Int64 { RunStats.movedToday(runs: runs, now: Date()).bytes }
+
+    func previewCount(_ filter: PreviewFilter) -> Int {
+        switch filter {
+        case .movable: return visibleItems.filter { $0.disposition == .proposed }.count
+        case .optional: return visibleItems.filter { $0.disposition == .optional }.count
+        case .blocked: return visibleItems.filter { $0.disposition == .blocked }.count
+        case .all: return visibleItems.count
+        }
+    }
+
+    var visibleItems: [PlannedMove] {
+        guard let plan else { return [] }
+        return plan.items.filter { !hiddenIDs.contains($0.id) }
+    }
+
+    var movableSelected: [PlannedMove] {
+        visibleItems.filter { selectedIDs.contains($0.id) && $0.disposition != .blocked }
+    }
+
     var selectedBytes: Int64 {
-        guard let plan else { return 0 }
-        return plan.items.filter { selectedIDs.contains($0.id) && $0.disposition != .blocked }.reduce(0) { $0 + $1.bytes }
+        movableSelected.reduce(0) { $0 + $1.bytes }
+    }
+
+    var selectedDeleteCount: Int {
+        movableSelected.filter { slot(of: $0) == .pendingDelete }.count
+    }
+
+    var undoCandidate: RunRecord? {
+        runs.first { item in
+            item.mode == .applied
+                && item.operations.contains { $0.action == .moved || $0.action == .copiedSourceRetained }
+                && !runs.contains { $0.undoOfRunID == item.id }
+        }
+    }
+
+    var crossVolumeSelectedCount: Int {
+        movableSelected.filter { !store.sameVolume($0.sourcePath, $0.destinationPath) }.count
+    }
+
+    var confirmMessage: String {
+        let count = movableSelected.count
+        let bytes = ByteFormat.string(bytes: selectedBytes)
+        var clauses: [String] = []
+        if !libraryState.hasCompletedDryRun {
+            clauses.append("第一次运行只写记录，不移动任何文件。勾选了 \(count) 个，大约 \(bytes)。")
+            if selectedDeleteCount > 0 {
+                clauses.append("其中 \(selectedDeleteCount) 个放进「待删」（只是归档）。")
+            }
+            clauses.append("演练完成后再确认一次，才会真正移动。")
+            return clauses.joined()
+        }
+        clauses.append("共 \(bytes)。")
+        if selectedDeleteCount > 0 {
+            clauses.append("其中 \(selectedDeleteCount) 个放进「待删」（只是归档）。")
+        }
+        let otherDisk = crossVolumeSelectedCount
+        if desk.moveOnly {
+            if otherDisk > 0 {
+                clauses.append("在其他磁盘上的 \(otherDisk) 个文件会留在原处，不会复制。")
+            }
+        } else if otherDisk > 0 {
+            clauses.append("其他磁盘上的 \(otherDisk) 个文件只复制，源文件仍留在原地。撤销可以移回同一块磁盘上的文件，不会删除副本。")
+        }
+        clauses.append("移动后可以按 ⌘Z 撤销。")
+        return clauses.joined()
+    }
+
+    var lastErrorSuggestsPrivacy: Bool {
+        guard let lastError else { return false }
+        return lastError.contains("权限") || lastError.contains("无法读取") || lastError.contains("不允许") || lastError.contains("Operation not permitted")
     }
 
     func showWindow() {
@@ -123,7 +248,7 @@ final class AppModel {
     }
 
     func chooseLibrary() {
-        guard let path = FolderPicker.choose(prompt: "设为产物库") else { return }
+        guard let path = FolderPicker.choose(prompt: "设为素材库") else { return }
         preferences.libraryRoot = path
         reloadLibrary()
         savePreferences()
@@ -150,7 +275,7 @@ final class AppModel {
             return
         }
         isBusy = true
-        status = "正在扫描…"
+        setStatus("正在扫描…", page: .preview)
         let prefs = preferences
         let state = libraryState.applying(preferences)
         let desk = desk
@@ -171,9 +296,11 @@ final class AppModel {
             }.value
             self.plan = product.plan
             self.selectedIDs = product.plan.preselectedIDs
+            self.hiddenIDs = []
+            self.undoBanner = nil
             self.libraryState = state
             self.isBusy = false
-            self.status = "可移动 \(product.plan.proposed.count) 个，另有 \(product.plan.optionalItems.count) 个待确认"
+            self.setStatus("可移动 \(product.plan.proposed.count) 个，另有 \(product.plan.optionalItems.count) 个待确认", page: .preview)
             self.section = .preview
             self.filter = product.plan.proposed.isEmpty ? .all : .movable
             self.refreshMenu()
@@ -196,10 +323,12 @@ final class AppModel {
             }.value
             self.plan = product.plan
             self.selectedIDs = product.plan.preselectedIDs
+            self.hiddenIDs = []
+            self.undoBanner = nil
             self.pendingPaths = []
             self.isBusy = false
             self.section = .preview
-            self.status = "监视到的新文件已放进预览。确认前不会移动。"
+            self.setStatus("新文件已放进待整理。确认前不会移动。", page: .preview)
             if !prefs.libraryRoot.isEmpty {
                 let library = prefs.libraryRoot
                 Task.detached {
@@ -210,12 +339,7 @@ final class AppModel {
     }
 
     func askToCommit() {
-        guard plan != nil else { return }
-        let movable = selectedIDs.intersection(Set((plan?.items ?? []).filter { $0.disposition != .blocked }.map(\.id)))
-        if (plan?.proposed.count ?? 0) + (plan?.optionalItems.count ?? 0) > 0 && movable.isEmpty {
-            lastError = "先勾选要处理的文件。"
-            return
-        }
+        guard plan != nil, !movableSelected.isEmpty else { return }
         confirming = true
     }
 
@@ -223,7 +347,7 @@ final class AppModel {
         guard let plan else { return }
         confirming = false
         isBusy = true
-        status = libraryState.hasCompletedDryRun ? "正在移动…" : "正在演练…"
+        setStatus(libraryState.hasCompletedDryRun ? "正在移动…" : "正在演练…", page: .preview)
         let request = ExecuteRequest.make(
             confirmed: true,
             planFingerprint: plan.fingerprint,
@@ -254,14 +378,36 @@ final class AppModel {
             self.isBusy = false
             if let error = product.error {
                 self.lastError = error
-                self.status = "没有完成"
+                self.setStatus("没有完成", page: .preview)
                 return
             }
             if let state = product.state { self.libraryState = state }
             self.runs = product.runs
             self.catalog = product.catalog
-            self.status = product.record?.note ?? "完成"
-            self.section = .runs
+            if let record = product.record {
+                let moved = record.operations.filter { $0.action == .moved }.count
+                let copied = record.operations.filter { $0.action == .copiedSourceRetained }.count
+                let skippedVolume = record.operations.filter { $0.action == .skipped && ($0.reason.contains("跨卷") || $0.reason.contains("其他磁盘")) }.count
+                let failed = record.operations.filter { $0.action == .failed }.count
+                self.undoBanner = MoveBanner(
+                    id: record.id,
+                    record: record,
+                    moved: moved,
+                    copied: copied,
+                    skippedVolume: skippedVolume,
+                    failed: failed,
+                    dry: record.mode != .applied
+                )
+                if record.mode == .applied {
+                    let gone = Set(record.operations.filter { $0.action == .moved || $0.action == .copiedSourceRetained }.map(\.id))
+                    self.hiddenIDs.formUnion(gone)
+                    self.selectedIDs.subtract(gone)
+                }
+            }
+            if let record = product.record, record.mode == .applied {
+                self.recognizeApplied(record)
+            }
+            self.setStatus(product.record?.note ?? "完成", page: .preview)
             self.refreshMenu()
             self.refreshReports()
         }
@@ -270,6 +416,7 @@ final class AppModel {
     func undo(_ record: RunRecord) {
         guard !isBusy else { return }
         isBusy = true
+        let page = section
         let library = record.libraryRoot
         let runID = record.id
         Task {
@@ -295,7 +442,18 @@ final class AppModel {
             }
             self.runs = product.runs
             self.catalog = product.catalog
-            self.status = product.record?.note ?? "已撤销"
+            if let record = product.record {
+                let restored = Set(record.operations.map { operation -> String in
+                    operation.id.hasSuffix("-undo") ? String(operation.id.dropLast("-undo".count)) : operation.id
+                })
+                self.hiddenIDs.subtract(restored)
+            }
+            let note = product.record?.note ?? "已撤销"
+            self.pageNotes = self.pageNotes.afterUndo(preview: WorkspaceSection.preview.rawValue, note: note)
+            if page != .preview {
+                self.setStatus(note, page: page)
+            }
+            self.refreshReports()
         }
     }
 
@@ -314,11 +472,11 @@ final class AppModel {
         let text = IndexStore.csv(catalog)
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.commaSeparatedText]
-        panel.nameFieldStringValue = "产物索引.csv"
+        panel.nameFieldStringValue = "素材索引.csv"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             try text.write(to: url, atomically: true, encoding: .utf8)
-            status = "已导出索引"
+            setStatus("已导出索引", page: .library)
         } catch {
             lastError = "导出失败：\(error.localizedDescription)"
         }
@@ -326,6 +484,423 @@ final class AppModel {
 
     func reveal(_ path: String) {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+    }
+
+    func saveDistribution() {
+        let config = distribution
+        let home = homeDirectory
+        try? DistributionStore.save(config, home: home, store: LocalFileStore())
+    }
+
+    func recognizeOutstanding(from window: RecognitionQuoteWindow) {
+        guard distribution.enabled else {
+            recognitionNote = "识别还关着。在设置里打开之后才会把文字发给本机的 OpenClaw。"
+            return
+        }
+        guard !recognizing, recognitionQuote == nil else {
+            recognitionNote = recognizing ? "上一次识别还没结束。" : "上一次的确认还开着。关掉那个窗口后再试。"
+            return
+        }
+        guard RecognitionAgent.callingName(distribution.agent, acknowledged: distribution.allowMainAgent) != nil else {
+            recognitionNote = RecognitionAgent.refusal
+            return
+        }
+        let library = preferences.libraryRoot
+        guard !library.isEmpty else {
+            recognitionNote = "还没有素材库。"
+            return
+        }
+        let agent = distribution.agent
+        Task.detached {
+            let records = ArchiveDatabase.open(path: StorePaths.sqliteFile(library))?.unrecognized() ?? []
+            let chosen = RecognitionBatch.outstanding(records: records)
+            let quote = RecognitionCost.quote(files: chosen.count, agent: agent, names: chosen.map(\.fileName))
+            await MainActor.run {
+                if chosen.isEmpty {
+                    self.recognitionNote = "没有需要识别的文件。"
+                    return
+                }
+                self.quotedJobs = []
+                self.recognitionQuoteWindow = window
+                self.recognitionQuote = quote
+            }
+        }
+    }
+
+    func runQuotedRecognition() {
+        let jobs = quotedJobs
+        recognitionQuote = nil
+        recognitionQuoteWindow = nil
+        quotedJobs = []
+        if jobs.isEmpty {
+            startLibraryRecognition()
+        } else {
+            runRecognition(jobs: jobs)
+        }
+    }
+
+    func cancelRecognitionQuote() {
+        recognitionQuote = nil
+        recognitionQuoteWindow = nil
+        quotedJobs = []
+        recognitionNote = "这次没有识别。"
+    }
+
+    private func startLibraryRecognition() {
+        guard !recognizing else { return }
+        let library = preferences.libraryRoot
+        guard !library.isEmpty else {
+            recognitionNote = "还没有素材库。"
+            return
+        }
+        recognizing = true
+        recognitionNote = "正在找出还没识别的文件…"
+        Task.detached {
+            let records = ArchiveDatabase.open(path: StorePaths.sqliteFile(library))?.unrecognized() ?? []
+            let jobs = RecognitionBatch.outstanding(records: records).map { record in
+                RecognitionJob(
+                    path: record.path,
+                    fileName: record.fileName,
+                    contentClass: record.contentClass,
+                    kind: record.kind,
+                    projectTag: record.projectTag,
+                    tags: []
+                )
+            }
+            await MainActor.run {
+                self.recognizing = false
+                if jobs.isEmpty {
+                    self.recognitionNote = "没有需要识别的文件。"
+                    return
+                }
+                self.runRecognition(jobs: jobs)
+            }
+        }
+    }
+
+    func recognizeApplied(_ record: RunRecord) {
+        guard distribution.enabled else { return }
+        guard RecognitionAgent.allowsAutomaticRun(distribution.agent) else {
+            recognitionNote = "移动之后没有自动识别。main 或还没填写的代理不会自动运行。要识别的话，先填一个不带工具的代理，再点「识别未处理的文件」。"
+            return
+        }
+        let planItems = plan?.items ?? []
+        let jobs = record.operations.compactMap { operation -> RecognitionJob? in
+            guard operation.action == .moved || operation.action == .copiedSourceRetained else { return nil }
+            let item = planItems.first { $0.id == operation.id }
+            let path = operation.destination
+            let name = PathKey.name(path)
+            let contentClass = item?.meta?.contentClass ?? ""
+            guard RecognitionKind.accepts(name: name, path: path, contentClass: contentClass) else { return nil }
+            return RecognitionJob(
+                path: path,
+                fileName: name,
+                contentClass: contentClass,
+                kind: item?.kind.rawValue ?? operation.kind.rawValue,
+                projectTag: item?.meta?.projectTag ?? "",
+                tags: []
+            )
+        }
+        let batch = Array(jobs.prefix(RecognitionService.batchLimit))
+        guard !batch.isEmpty else { return }
+        if recognizing || recognitionQuote != nil {
+            recognitionNote = "上一次识别还没结束。完成后可以再点「识别未处理的文件」。"
+            return
+        }
+        quotedJobs = batch
+        recognitionQuoteWindow = .main
+        recognitionQuote = RecognitionCost.quote(files: batch.count, agent: distribution.agent, names: batch.map(\.fileName))
+    }
+
+    func runRecognition(jobs: [RecognitionJob]) {
+        guard distribution.enabled, !recognizing, !jobs.isEmpty else { return }
+        guard RecognitionAgent.callingName(distribution.agent, acknowledged: distribution.allowMainAgent) != nil else {
+            recognitionNote = RecognitionAgent.refusal
+            return
+        }
+        recognizing = true
+        recognitionNote = "正在识别…"
+        let config = distribution
+        let home = homeDirectory
+        let tags = ProjectTags.builtins + desk.extraTags
+        let library = preferences.libraryRoot
+        let minimumConfidence = preferences.minimumConfidence
+        let batch = Array(jobs.prefix(RecognitionService.batchLimit))
+        Task.detached {
+            let files = batch.map { job in
+                RecognitionWork(
+                    path: job.path,
+                    fileName: job.fileName,
+                    contentClass: job.contentClass,
+                    kind: job.kind,
+                    projectTag: job.projectTag,
+                    tags: job.tags,
+                    text: MacTextExtractor.extract(path: job.path)
+                )
+            }
+            let result = RecognitionBatch.run(
+                enabled: true,
+                files: files,
+                allowedTags: tags,
+                config: config,
+                home: home,
+                runner: ProcessOpenClaw(),
+                now: Date(),
+                minimumConfidence: minimumConfidence
+            )
+            if !library.isEmpty, let database = ArchiveDatabase.open(path: StorePaths.sqliteFile(library)) {
+                for update in result.updates {
+                    database.setRecognition(
+                        path: update.path,
+                        summary: update.summary,
+                        project: update.project,
+                        confidence: update.confidence,
+                        recognizedAt: update.recognizedAt,
+                        text: update.text
+                    )
+                }
+            }
+            let proposals = result.proposals
+            let note = result.note
+            await MainActor.run {
+                var pending = self.distribution.pending
+                DispatchBoard.enqueue(proposals, into: &pending)
+                self.distribution.pending = pending
+                self.recognizing = false
+                self.recognitionNote = note
+                self.saveDistribution()
+            }
+        }
+    }
+
+    func addDispatchRule(project: String, kind: String, tag: String, channel: String, account: String, target: String, alias: String = "", messageTemplate: String, attachFile: Bool) {
+        let rule = DispatchRule.make(
+            project: project,
+            kind: kind,
+            tag: tag,
+            channel: channel.trimmingCharacters(in: .whitespacesAndNewlines),
+            account: account.trimmingCharacters(in: .whitespacesAndNewlines),
+            target: target.trimmingCharacters(in: .whitespacesAndNewlines),
+            alias: alias.trimmingCharacters(in: .whitespacesAndNewlines),
+            messageTemplate: messageTemplate.isEmpty ? DistributionConfig.defaultMessageTemplate : messageTemplate,
+            attachFile: attachFile
+        )
+        guard !rule.channel.isEmpty, !rule.target.isEmpty else { return }
+        guard !rule.project.isEmpty || !rule.kind.isEmpty || !rule.tag.isEmpty else { return }
+        distribution.rules.append(rule)
+        saveDistribution()
+    }
+
+    func removeDispatchRule(_ id: String) {
+        distribution.rules.removeAll { $0.id == id }
+        saveDistribution()
+    }
+
+    func removePath(fromRule id: String) {
+        guard let index = distribution.rules.firstIndex(where: { $0.id == id }) else { return }
+        let cleaned = DispatchTemplate.removingPathToken(distribution.rules[index].messageTemplate)
+        distribution.rules[index].messageTemplate = cleaned
+        let result = DispatchBoard.stripQueuedPaths(ruleID: id, template: cleaned, pending: &distribution.pending)
+        var notes = ["已去掉这条规则里的路径。"]
+        if result.rewritten > 0 {
+            notes.append("重写了 \(result.rewritten) 条还没改过的待分发。")
+        }
+        if !result.editedFileNames.isEmpty {
+            notes.append("\(result.editedFileNames.joined(separator: "、")) 的正文是你改过的，还留着本机路径。请到待分发里点编辑，自己删掉。")
+        }
+        dispatchNote = notes.joined()
+        saveDistribution()
+    }
+
+    func updateDispatchMessage(id: String, message: String) {
+        DispatchBoard.edit(id: id, message: message, pending: &distribution.pending)
+        saveDistribution()
+    }
+
+    func updateDispatchProject(id: String, project: String) {
+        guard let index = distribution.pending.firstIndex(where: { $0.id == id }) else { return }
+        let current = distribution.pending[index]
+        guard current.project != project else { return }
+        let result = DispatchBoard.retarget(current, project: project, rules: distribution.rules)
+        distribution.pending[index] = result.item
+        var note = result.matched ? "已按「\(result.item.project)」重新匹配收件人。" : "没有规则能接住「\(result.item.project)」。收件人还是原来的。"
+        if !result.manualBodyNote.isEmpty {
+            note += result.manualBodyNote
+        }
+        dispatchNote = note
+        saveDistribution()
+    }
+
+    func restoreSkipped(_ entry: DispatchLogEntry) {
+        guard !entry.restored else { return }
+        var pending = distribution.pending
+        let restored = DispatchBoard.restore(entry, into: &pending)
+        let alreadyQueued = entry.snapshot.map { snapshot in
+            pending.contains { $0.path == snapshot.path && $0.ruleID == snapshot.ruleID }
+        } ?? false
+        distribution.pending = pending
+        if restored || alreadyQueued {
+            if let index = distribution.log.firstIndex(where: { $0.id == entry.id }) {
+                distribution.log[index].restored = true
+            }
+            dispatchNote = restored ? "已放回待分发。" : "这条已经在待分发里。"
+        } else {
+            dispatchNote = "这条没有可放回的内容。"
+        }
+        saveDistribution()
+    }
+
+    func requestSend(id: String) {
+        guard sendingID == nil else { return }
+        guard let item = distribution.pending.first(where: { $0.id == id }) else { return }
+        if DispatchMessageGuard.blocksSend(item.message) {
+            dispatchNote = DispatchMessageGuard.warning
+            return
+        }
+        if RehearsalBook.needsDryRun(channel: item.channel, account: item.account, target: item.target, rehearsed: distribution.rehearsedTargets) {
+            sendDispatch(id: id, forceDryRun: true)
+        } else {
+            confirmingSendID = id
+        }
+    }
+
+    func confirmPendingSend() {
+        guard let id = confirmingSendID else { return }
+        confirmingSendID = nil
+        sendDispatch(id: id, forceDryRun: false)
+    }
+
+    func retryDispatch(_ entry: DispatchLogEntry) {
+        guard entry.outcome == .failed else { return }
+        guard !DispatchRetry.superseded(entry, log: distribution.log, sent: distribution.sentIndex) else { return }
+        let itemID: String
+        if distribution.pending.contains(where: { $0.id == entry.itemID }) {
+            itemID = entry.itemID
+        } else if let snapshot = entry.snapshot {
+            var pending = distribution.pending
+            if !pending.contains(where: { $0.path == snapshot.path && $0.ruleID == snapshot.ruleID }) {
+                pending.append(snapshot)
+                distribution.pending = pending
+                saveDistribution()
+            }
+            itemID = snapshot.id
+        } else {
+            return
+        }
+        if DispatchRetry.forcesDryRun(entry) {
+            sendDispatch(id: itemID, forceDryRun: true)
+        } else {
+            requestSend(id: itemID)
+        }
+    }
+
+    func skipDispatch(id: String) {
+        guard sendingID != id else { return }
+        if let entry = DispatchBoard.skip(id: id, pending: &distribution.pending, now: Date()) {
+            distribution.log.append(entry)
+            trimDispatchLog()
+            dispatchNote = entry.detail
+            saveDistribution()
+        }
+    }
+
+    func sendDispatch(id: String, forceDryRun: Bool) {
+        guard sendingID == nil else { return }
+        guard let item = distribution.pending.first(where: { $0.id == id }) else { return }
+        if DispatchMessageGuard.blocksSend(item.message) {
+            dispatchNote = DispatchMessageGuard.warning
+            return
+        }
+        let dryRun = forceDryRun || RehearsalBook.needsDryRun(
+            channel: item.channel,
+            account: item.account,
+            target: item.target,
+            rehearsed: distribution.rehearsedTargets
+        )
+        sendingID = id
+        let config = distribution
+        let home = homeDirectory
+        Task.detached {
+            let result = DispatchSender.deliver(item: item, config: config, home: home, dryRun: dryRun, runner: ProcessOpenClaw())
+            await MainActor.run {
+                self.finishDispatch(id: id, ok: result.ok, dryRun: dryRun, detail: result.detail)
+            }
+        }
+    }
+
+    func refreshRecipients() {
+        guard !loadingRecipients else { return }
+        loadingRecipients = true
+        sessionNote = "正在读取会话…"
+        let config = distribution
+        let home = homeDirectory
+        Task.detached {
+            let request = OpenClawCommands.sessions(
+                executable: config.executable(home: home),
+                agent: config.agent,
+                timeoutSeconds: min(config.timeoutSeconds, 30),
+                pathPrefixes: config.expandedPathPrefixes(home: home)
+            )
+            let parsed: [KnownRecipient]
+            let note: String
+            do {
+                let response = try ProcessOpenClaw().run(request)
+                if response.status == 0 {
+                    parsed = SessionRecipients.parse(response.stdout)
+                    note = parsed.isEmpty ? "这次没有读到收件人。可以自己填频道、账号和收件人。" : "读到 \(parsed.count) 个收件人。点一下才填进规则，不会自动保存。"
+                } else {
+                    parsed = []
+                    note = "没有读到会话。可以自己填频道、账号和收件人。"
+                }
+            } catch {
+                parsed = []
+                note = "没有读到会话。可以自己填频道、账号和收件人。"
+            }
+            await MainActor.run {
+                self.sessionRecipients = parsed
+                self.sessionNote = note
+                self.loadingRecipients = false
+            }
+        }
+    }
+
+    private func finishDispatch(id: String, ok: Bool, dryRun: Bool, detail: String) {
+        sendingID = nil
+        guard let item = distribution.pending.first(where: { $0.id == id }) else { return }
+        var pending = distribution.pending
+        var rehearsed = distribution.rehearsedTargets
+        let entry = DispatchBoard.finishSend(
+            item: item,
+            ok: ok,
+            dryRun: dryRun,
+            detail: detail,
+            pending: &pending,
+            rehearsed: &rehearsed,
+            now: Date()
+        )
+        distribution.pending = pending
+        distribution.rehearsedTargets = rehearsed
+        distribution.log.append(entry)
+        if entry.outcome == .sent {
+            SentIndex.remember(
+                channel: entry.channel,
+                account: entry.account,
+                target: entry.target,
+                path: entry.path,
+                fileName: entry.fileName,
+                at: entry.at,
+                into: &distribution.sentIndex
+            )
+        }
+        trimDispatchLog()
+        dispatchNote = detail
+        saveDistribution()
+    }
+
+    private func trimDispatchLog() {
+        if distribution.log.count > 200 {
+            distribution.log.removeFirst(distribution.log.count - 200)
+        }
     }
 
     func savePreferences() {
@@ -352,7 +927,7 @@ final class AppModel {
     func requireRehearsalAgain() {
         libraryState.hasCompletedDryRun = false
         savePreferences()
-        status = "下一个产物库运行会重新演练"
+        setStatus("下一次确认会重新演练，不会马上移动文件。", page: .preview)
     }
 
     func addRule(keyword: String, source: SourceTool) {
@@ -368,6 +943,27 @@ final class AppModel {
     func removeRule(_ id: String) {
         preferences.userRules.removeAll { $0.id == id }
         savePreferences()
+    }
+
+    func restoreRule(_ rule: UserRule, at index: Int) {
+        let insertAt = min(max(index, 0), preferences.userRules.count)
+        preferences.userRules.insert(rule, at: insertAt)
+        savePreferences()
+    }
+
+    func moveUserRules(from offsets: IndexSet, to destination: Int) {
+        preferences.userRules = Self.reordered(preferences.userRules, from: offsets, to: destination)
+        savePreferences()
+    }
+
+    private static func reordered<T>(_ items: [T], from offsets: IndexSet, to destination: Int) -> [T] {
+        var copy = items
+        let moving = offsets.sorted().map { copy[$0] }
+        for index in offsets.sorted(by: >) { copy.remove(at: index) }
+        let shift = offsets.filter { $0 < destination }.count
+        let index = min(max(destination - shift, 0), copy.count)
+        copy.insert(contentsOf: moving, at: index)
+        return copy
     }
 
     func applyHotkey(keyCode: UInt32, modifiers: UInt32, display: String) {
@@ -429,8 +1025,9 @@ final class AppModel {
         if preferences.libraryRoot.isEmpty {
             preferences.libraryRoot = DefaultLocations.desktop(home: homeDirectory)
         }
-        if preferences.scanRoots.isEmpty {
-            preferences.scanRoots = DefaultLocations.scanRoots(home: homeDirectory)
+        guard !preferences.scanRoots.isEmpty else {
+            lastError = "先选择扫描位置。不会自动加入未勾选的文件夹。"
+            return
         }
         preferences.watchEnabled = true
         desk.onboardingDone = true
@@ -439,9 +1036,7 @@ final class AppModel {
     }
 
     func presentSearch() {
-        searchOpen = true
-        showWindow()
-        runSearch()
+        QuickSearchController.shared.toggle(model: self)
     }
 
     func runSearch() {
@@ -474,31 +1069,58 @@ final class AppModel {
     }
 
     func undoLast() {
-        guard let target = runs.first(where: { item in
-            item.mode == .applied && item.operations.contains { $0.action == .moved } && !runs.contains { $0.undoOfRunID == item.id }
-        }) else {
-            lastError = "没有可以撤回的移动。"
-            return
+        let window = NSApp.keyWindow
+        let responderManager = window?.firstResponder?.undoManager
+        let windowManager = window?.undoManager
+        let route = UndoRouting.undo(
+            responderCanUndo: responderManager?.canUndo == true,
+            windowCanUndo: windowManager?.canUndo == true,
+            keyWindowIsMain: window?.identifier?.rawValue == OrganizerWindow.main
+        )
+        switch route {
+        case .windowAction:
+            if responderManager?.canUndo == true {
+                responderManager?.undo()
+            } else {
+                windowManager?.undo()
+            }
+        case .fileMove:
+            undoLatestMove()
+        case .none:
+            break
         }
+    }
+
+    func undoLatestMove() {
+        guard !isBusy, let target = undoCandidate else { return }
         undo(target)
+    }
+
+    func redoLast() {
+        let window = NSApp.keyWindow
+        let responderManager = window?.firstResponder?.undoManager
+        let windowManager = window?.undoManager
+        let route = UndoRouting.redo(
+            responderCanRedo: responderManager?.canRedo == true,
+            windowCanRedo: windowManager?.canRedo == true
+        )
+        guard route == .windowAction else { return }
+        if responderManager?.canRedo == true {
+            responderManager?.redo()
+        } else {
+            windowManager?.redo()
+        }
     }
 
     func refreshReports() {
         let records = searchAll()
-        let files = records.map { record in
-            ReportFile(
-                path: record.path,
-                bytes: record.bytes,
-                modifiedAt: ISO8601DateFormatter().date(from: record.modifiedAt) ?? Date(),
-                indexedAt: ISO8601DateFormatter().date(from: record.modifiedAt),
-                contentClass: record.contentClass,
-                publishStatus: record.publishStatus,
-                inHistory: record.path.contains("历史版本")
-            )
-        }
+        let files = currentReportFiles()
         let digest = WeeklyReports.digest(files, now: Date())
         weeklyMarkdown = digest.markdown
+        weeklyDigest = digest
+        reportFiles = files
         let space = WeeklyReports.space(files)
+        spaceReport = space
         spaceSummary = "最大 \(space.largest.count) 个，可收回约 \(ByteFormat.string(bytes: space.reclaimableBytes))（渲染帧、历史版本、缓存、日志）。不会自动删除。"
         staleVideos = records.filter {
             PublishReminder.isStale(status: $0.publishStatus, since: ISO8601DateFormatter().date(from: $0.modifiedAt) ?? Date(), now: Date(), days: desk.pendingVideoDays)
@@ -514,15 +1136,11 @@ final class AppModel {
     }
 
     func writeWeeklyReport() {
-        let records = searchAll()
-        let files = records.map { record in
-            ReportFile(path: record.path, bytes: record.bytes, modifiedAt: ISO8601DateFormatter().date(from: record.modifiedAt) ?? Date(), indexedAt: Date(), contentClass: record.contentClass, publishStatus: record.publishStatus, inHistory: record.path.contains("历史版本"))
-        }
-        let digest = WeeklyReports.digest(files, now: Date())
+        let digest = WeeklyReports.digest(currentReportFiles(), now: Date())
         weeklyMarkdown = digest.markdown
         do {
             let path = try WeeklyReports.write(digest, desktop: DefaultLocations.desktop(home: homeDirectory), now: Date(), store: store)
-            status = "周报已写入 \(path)"
+            setStatus("周报已写入 \(path)", page: .weekly)
         } catch {
             lastError = "周报没有写成：\(error)"
         }
@@ -547,7 +1165,7 @@ final class AppModel {
         Task.detached {
             try? PublishedStore.save(library, home: home, store: LocalFileStore())
         }
-        status = "已导入 \(parsed.count) 条发布记录"
+        setStatus("已导入 \(parsed.count) 条发布记录", page: .tracking)
     }
 
     func authorize(_ platform: PublishPlatform) {
@@ -556,7 +1174,7 @@ final class AppModel {
             lastError = "先在设置里填写 \(platform.displayName) 的 Client ID。"
             return
         }
-        let url = OAuthEndpoints.authorizeURL(platform: platform, clientID: clientID, redirect: "http://127.0.0.1:8765/callback", state: installID)
+        let url = OAuthEndpoints.authorizeURL(platform: platform, clientID: clientID, redirect: OAuthEndpoints.callbackURL, state: installID)
         NSWorkspace.shared.open(URL(string: url)!)
         oauthNote = "浏览器打开后，把地址栏里的 code 贴回来。令牌只进钥匙串。"
     }
@@ -570,7 +1188,7 @@ final class AppModel {
             lastError = "换令牌需要 Client ID 和 Client Secret。"
             return
         }
-        let form = OAuthEndpoints.tokenForm(platform: platform, code: code, clientID: clientID, clientSecret: secretText, redirect: "http://127.0.0.1:8765/callback")
+        let form = OAuthEndpoints.tokenForm(platform: platform, code: code, clientID: clientID, clientSecret: secretText, redirect: OAuthEndpoints.callbackURL)
         let url = OAuthEndpoints.tokenURL(platform: platform)
         let account = tokenAccount(platform)
         let generation = startPlatformWork("正在向 \(platform.displayName) 换取令牌…")
@@ -626,8 +1244,11 @@ final class AppModel {
             let library = self.listings
             let home = self.homeDirectory
             Task.detached { try? PublishedStore.save(library, home: home, store: LocalFileStore()) }
-            self.status = "已同步 \(videos.count) 条 \(platform.displayName) 发布记录"
-            self.oauthNote = self.status
+            let note = "已同步 \(videos.count) 条 \(platform.displayName) 发布记录"
+            self.setStatus(note, page: .tracking)
+            self.oauthNote = note
+            self.platformLinked[platform.rawValue] = true
+            self.platformSyncedAt[platform.rawValue] = Date()
             self.finishPlatformWork(generation)
         }
     }
@@ -669,7 +1290,13 @@ final class AppModel {
         let trimmed = secret.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         try? KeychainStore().write(account: secretAccount(platform), data: Data(trimmed.utf8))
-        oauthNote = "\(platform.displayName) 的 Client Secret 已放进钥匙串，不会写进 JSON。"
+        platformSecretSaved[platform.rawValue] = true
+        let secretName: String
+        switch platform {
+        case .youtube, .tiktok: secretName = "Client Secret"
+        case .facebook: secretName = "App Secret"
+        }
+        oauthNote = "\(platform.displayName) 的 \(secretName) 已放进钥匙串，不会写进 JSON。"
     }
 
     func makeDelivery(tag: String) {
@@ -690,7 +1317,7 @@ final class AppModel {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             try packed.zip.write(to: url)
-            status = "已写出 \(files.count) 个文件和 SHA256 清单"
+            setStatus("已写出 \(files.count) 个文件和 SHA256 清单", page: .library)
         } catch {
             lastError = "打包失败：\(error.localizedDescription)"
         }
@@ -722,16 +1349,7 @@ final class AppModel {
     }
 
     func refreshMenu() {
-        let pending = pendingPaths.count + (plan?.proposed.count ?? 0)
-        let today = todayArchivedCount()
-        StatusBarController.shared.refresh(pending: pending, today: today)
-    }
-
-    private func todayArchivedCount() -> Int {
-        let calendar = Calendars.shanghai()
-        return runs.filter { record in
-            record.mode == .applied && calendar.isDate(record.finishedAt, inSameDayAs: Date())
-        }.reduce(0) { $0 + $1.operations.filter { $0.action == .moved }.count }
+        // 菜单栏改由 MenuBarExtra 直接读 pendingCount，不再另建一个状态栏项。
     }
 
     private func searchAll() -> [ArchiveRecord] {
@@ -766,37 +1384,239 @@ final class AppModel {
         }
         return (created, "使用默认快捷键 ⌥⌘O")
     }
+
+    func finishOnboarding(library: String, roots: [String], watch: Bool) {
+        let libraryPath = library.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !libraryPath.isEmpty else {
+            lastError = "先选择素材库。"
+            return
+        }
+        let chosen = DefaultLocations.orderedScanRoots(roots, home: homeDirectory)
+        guard !chosen.isEmpty else {
+            lastError = "至少选择一个扫描位置。"
+            return
+        }
+        preferences.libraryRoot = libraryPath
+        preferences.scanRoots = chosen
+        preferences.watchEnabled = watch
+        desk.onboardingDone = true
+        reloadLibrary()
+        savePreferences()
+        beginScan()
+    }
+
+    func selectFiltered(_ on: Bool) {
+        let ids = Set(filteredItems.map(\.id))
+        if on {
+            let movable = Set(filteredItems.filter { $0.disposition != .blocked }.map(\.id))
+            selectedIDs.formUnion(movable)
+        } else {
+            selectedIDs.subtract(ids)
+        }
+    }
+
+    func slot(of item: PlannedMove) -> DeskSlot {
+        if let raw = item.deskSlot, let slot = DeskSlot(rawValue: raw) { return slot }
+        let relative = PathKey.relative(file: item.destinationPath, root: preferences.libraryRoot) ?? item.destinationPath
+        let ranked = DeskSlot.allCases.map { ($0, desk.relative(for: $0)) }.sorted { $0.1.count > $1.1.count }
+        for (slot, folder) in ranked where relative == folder || relative.hasPrefix(folder + "/") {
+            return slot
+        }
+        return .otherMedia
+    }
+
+    func leavesOnOtherDisk(_ item: PlannedMove) -> Bool {
+        guard desk.moveOnly else { return false }
+        return !store.sameVolume(item.sourcePath, item.destinationPath)
+    }
+
+    func archiveCatalog() -> [ArchiveRecord] {
+        let indexed = catalog.entries.sorted { $0.indexedAt > $1.indexedAt }.map(archiveRecord(from:))
+        guard !preferences.libraryRoot.isEmpty, let database = ArchiveDatabase.open(path: StorePaths.sqliteFile(preferences.libraryRoot)) else {
+            return indexed
+        }
+        if indexed.isEmpty { return database.search("") }
+        return ArchiveQuery.merging(indexed, recognition: database.recognized())
+    }
+
+    private func currentReportFiles() -> [ReportFile] {
+        if !catalog.entries.isEmpty {
+            return WeeklyReports.files(catalog: catalog, library: preferences.libraryRoot)
+        }
+        return searchAll().map { record in
+            ReportFile(
+                path: record.path,
+                bytes: record.bytes,
+                modifiedAt: ISO8601DateFormatter().date(from: record.modifiedAt) ?? .distantPast,
+                indexedAt: nil,
+                contentClass: record.contentClass,
+                publishStatus: record.publishStatus,
+                inHistory: record.path.contains("历史版本")
+            )
+        }
+    }
+
+    func archives(matching query: String) -> [ArchiveRecord] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let catalogHits = archiveCatalog()
+        if trimmed.isEmpty { return Array(catalogHits.prefix(8)) }
+        if !catalogHits.isEmpty {
+            return Array(ArchiveQuery.filter(catalogHits, query: trimmed).prefix(50))
+        }
+        guard !preferences.libraryRoot.isEmpty,
+              let hits = ArchiveDatabase.open(path: StorePaths.sqliteFile(preferences.libraryRoot))?.search(trimmed) else {
+            return []
+        }
+        return Array(ArchiveQuery.filter(hits, query: trimmed).prefix(50))
+    }
+
+    func knownProjectTags() -> [String] {
+        var tags = ProjectTags.builtins + desk.extraTags
+        for entry in catalog.entries {
+            let tag = entry.meta?.projectTag ?? ""
+            if tag.count >= 2, !tags.contains(tag) { tags.append(tag) }
+        }
+        return tags
+    }
+
+    func categoryBytes() -> [(category: DeskCategory, bytes: Int64)] {
+        var totals: [DeskCategory: Int64] = [:]
+        for file in reportFiles {
+            let category = category(forPath: file.path)
+            totals[category, default: 0] += file.bytes
+        }
+        return DeskCategory.allCases.compactMap { category in
+            guard let bytes = totals[category], bytes > 0 else { return nil }
+            return (category, bytes)
+        }
+    }
+
+    func category(forPath path: String) -> DeskCategory {
+        let relative = PathKey.relative(file: path, root: preferences.libraryRoot) ?? path
+        let ranked = DeskSlot.allCases.map { ($0, desk.relative(for: $0)) }.sorted { $0.1.count > $1.1.count }
+        for (slot, folder) in ranked where relative == folder || relative.hasPrefix(folder + "/") || path.contains("/" + folder + "/") {
+            return DeskCategory.from(slot: slot)
+        }
+        return .other
+    }
+
+    func refreshPlatformLink() {
+        for platform in PublishPlatform.allCases {
+            platformLinked[platform.rawValue] = KeychainStore().contains(account: tokenAccount(platform))
+            platformSecretSaved[platform.rawValue] = KeychainStore().contains(account: secretAccount(platform))
+        }
+    }
+
+    func setLaunchAtLogin(_ enabled: Bool) {
+        do {
+            if enabled {
+                if SMAppService.mainApp.status != .enabled {
+                    try SMAppService.mainApp.register()
+                }
+            } else if SMAppService.mainApp.status == .enabled {
+                try SMAppService.mainApp.unregister()
+            }
+        } catch {
+            lastError = "登录时启动需要从「素材整理器.app」打开。\(error.localizedDescription)"
+        }
+    }
+
+    func openFilePrivacySettings() {
+        let urls = [
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_FilesAndFolders",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders",
+        ].compactMap(URL.init(string:))
+        for url in urls where NSWorkspace.shared.open(url) {
+            return
+        }
+    }
+
+    func moveRoutes(from offsets: IndexSet, to destination: Int) {
+        desk.rules.move(fromOffsets: offsets, toOffset: destination)
+        savePreferences()
+    }
+
+    func setRouteEnabled(_ id: String, _ enabled: Bool) {
+        guard let index = desk.rules.firstIndex(where: { $0.id == id }) else { return }
+        desk.rules[index].enabled = enabled
+        savePreferences()
+    }
+
+    func restoreRoute(_ rule: RouteRule, at index: Int) {
+        let insertAt = min(max(index, 0), desk.rules.count)
+        desk.rules.insert(rule, at: insertAt)
+        savePreferences()
+    }
+
+    func removeTag(_ tag: String) {
+        desk.extraTags.removeAll { $0 == tag }
+        savePreferences()
+    }
+
+    func setDestination(_ slot: DeskSlot, absolutePath: String) {
+        guard let relative = PathKey.relative(file: absolutePath, root: preferences.libraryRoot) else {
+            lastError = "请选择素材库里面的文件夹。这里只保存相对路径。"
+            return
+        }
+        desk.destinations[slot.rawValue] = relative
+        savePreferences()
+    }
+
+    private func archiveRecord(from entry: IndexEntry) -> ArchiveRecord {
+        ArchiveRecord(
+            id: entry.id,
+            fileName: entry.fileName,
+            originalName: entry.meta?.originalName ?? entry.fileName,
+            kind: entry.kind.rawValue,
+            projectTag: entry.meta?.projectTag ?? "",
+            modifiedAt: ISO8601DateFormatter().string(from: entry.modifiedAt),
+            platform: entry.meta?.platform ?? "",
+            publishStatus: entry.meta?.publishStatus ?? "",
+            version: entry.meta?.versionLabel ?? "",
+            path: PathKey.joining(preferences.libraryRoot, entry.relativePath),
+            contentClass: entry.meta?.contentClass ?? "",
+            publishedAt: "",
+            bytes: entry.bytes,
+            reason: ""
+        )
+    }
 }
 
 enum WorkspaceSection: String, CaseIterable, Identifiable {
-    case scan
     case preview
-    case index
+    case dispatch
+    case locations
     case runs
-    case reports
-    case settings
+    case library
+    case space
+    case weekly
+    case tracking
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .scan: return "扫描"
-        case .preview: return "预览"
-        case .index: return "索引"
+        case .preview: return "待整理"
+        case .dispatch: return "待分发"
+        case .locations: return "扫描位置"
         case .runs: return "记录"
-        case .reports: return "报告"
-        case .settings: return "设置"
+        case .library: return "资料库"
+        case .space: return "空间"
+        case .weekly: return "本周"
+        case .tracking: return "发布跟踪"
         }
     }
 
     var symbol: String {
         switch self {
-        case .scan: return "magnifyingglass"
-        case .preview: return "checklist"
-        case .index: return "square.stack.3d.up"
+        case .preview: return "tray"
+        case .dispatch: return "tray.and.arrow.up"
+        case .locations: return "folder"
         case .runs: return "clock.arrow.circlepath"
-        case .reports: return "chart.bar"
-        case .settings: return "gearshape"
+        case .library: return "square.stack.3d.up"
+        case .space: return "internaldrive"
+        case .weekly: return "calendar"
+        case .tracking: return "paperplane"
         }
     }
 }
@@ -813,7 +1633,7 @@ enum PreviewFilter: String, CaseIterable, Identifiable {
         switch self {
         case .movable: return "可移动"
         case .optional: return "待确认"
-        case .blocked: return "已拦住"
+        case .blocked: return "不移动"
         case .all: return "全部"
         }
     }

@@ -41,6 +41,10 @@ final class HashAndSafetyTests: XCTestCase {
         XCTAssertTrue(Copy.firstRunNote.contains("演练"))
         XCTAssertTrue(Copy.firstRunNote.contains("未移动"))
         XCTAssertTrue(Copy.neverDeletes.contains("不会删除"))
+        XCTAssertTrue(Copy.neverDeletes.contains("留在原处"))
+        XCTAssertFalse(Copy.neverDeletes.contains("只复制"))
+        XCTAssertTrue(Copy.appliedNote(moveOnly: false).contains("只复制"))
+        XCTAssertTrue(Copy.neverDeletes(moveOnly: false).contains("只复制"))
         XCTAssertTrue(OrganizerError.confirmationRequired.description.contains("确认"))
     }
 }
@@ -382,7 +386,7 @@ final class PipelineTests: XCTestCase {
             state: state,
             now: when
         )
-        XCTAssertTrue(plan.blocked.contains { $0.reason.contains("产物库") })
+        XCTAssertTrue(plan.blocked.contains { $0.reason.contains("素材库") })
         XCTAssertTrue(plan.proposed.contains { $0.fileName == "new_midjourney.png" })
         XCTAssertTrue(plan.issues.contains { $0.path == "/disk/missing.png" })
 

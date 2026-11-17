@@ -23,7 +23,18 @@ int chanwu_db_upsert(
     const char *reason
 );
 int chanwu_db_remove(void *db, const char *path);
+int chanwu_db_set_recognition(
+    void *db,
+    const char *path,
+    const char *summary,
+    const char *project,
+    double confidence,
+    const char *recognized_at,
+    const char *recognized_text
+);
 int chanwu_db_search(void *db, const char *a, const char *b, const char *c, const char *d, char **json_out);
+int chanwu_db_unrecognized(void *db, char **json_out);
+int chanwu_db_recognized(void *db, char **json_out);
 void chanwu_db_free(char *text);
 
 #endif

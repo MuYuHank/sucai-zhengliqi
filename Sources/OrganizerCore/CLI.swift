@@ -115,16 +115,16 @@ public enum CLIParser {
 
     public static let helpText = """
     \(organizerName) \(organizerVersion)
-    找出、识别、分类并在确认后移动 AI 生成的产物。不会删除文件。每个产物库的第一次 apply 是演练。
+    找出、识别、分类并在确认后移动 AI 生成的素材。不会删除文件。每个素材库的第一次 apply 是演练。
 
     用法：
-      chanwu scan --root 路径 [--root 路径] --library 产物库 [--json] [--min-confidence 0.7] [--include-unknown] [--max-depth 8]
-      chanwu apply --library 产物库 [--plan 清单.json] --confirm [--dry-run] [--select id,id]
-      chanwu undo --library 产物库 --run 记录ID
-      chanwu index --library 产物库 [--query 关键词] [--csv]
-      chanwu runs --library 产物库
-      chanwu pack --library 产物库 --project 项目标签 --output 交付.zip
-      chanwu report --library 产物库 [--desktop 桌面路径] [--write]
+      chanwu scan --root 路径 [--root 路径] --library 素材库 [--json] [--min-confidence 0.7] [--include-unknown] [--max-depth 8]
+      chanwu apply --library 素材库 [--plan 清单.json] --confirm [--dry-run] [--select id,id]
+      chanwu undo --library 素材库 --run 记录ID
+      chanwu index --library 素材库 [--query 关键词] [--csv]
+      chanwu runs --library 素材库
+      chanwu pack --library 素材库 --project 项目标签 --output 交付.zip
+      chanwu report --library 素材库 [--desktop 桌面路径] [--write]
       chanwu version
 
     \(Copy.neverDeletes)
@@ -415,7 +415,7 @@ public enum CLIRunner {
                 return CLIResult(exitCode: 0, stdout: IndexStore.csv(catalog), stderr: "")
             }
             let entries = IndexStore.search(catalog, query: flags.query)
-            if entries.isEmpty { return CLIResult(exitCode: 0, stdout: "索引里没有匹配的文件。", stderr: "") }
+            if entries.isEmpty { return CLIResult(exitCode: 0, stdout: "资料库里没有匹配的文件。", stderr: "") }
             let lines = entries.map { "\($0.fileName)\t\($0.source.displayName)\t\($0.kind.displayName)\t\($0.relativePath)" }
             return CLIResult(exitCode: 0, stdout: lines.joined(separator: "\n"), stderr: "")
         } catch {

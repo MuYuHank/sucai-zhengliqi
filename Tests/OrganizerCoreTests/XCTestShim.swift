@@ -31,6 +31,11 @@ func XCTAssertEqual<T: Equatable>(_ a: @autoclosure () throws -> T, _ b: @autocl
     catch { xctRecord("XCTAssertEqual threw \(error)", message(), file, line) }
 }
 
+func XCTAssertEqual<T: FloatingPoint>(_ a: @autoclosure () throws -> T, _ b: @autoclosure () throws -> T, accuracy: T, _ message: @autoclosure () -> String = "", file: StaticString = #filePath, line: UInt = #line) {
+    do { let x = try a(), y = try b(); if abs(x - y) > accuracy { xctRecord("XCTAssertEqual failed: (\(x)) is not equal to (\(y)) +/- (\(accuracy))", message(), file, line) } }
+    catch { xctRecord("XCTAssertEqual threw \(error)", message(), file, line) }
+}
+
 func XCTAssertNotEqual<T: Equatable>(_ a: @autoclosure () throws -> T, _ b: @autoclosure () throws -> T, _ message: @autoclosure () -> String = "", file: StaticString = #filePath, line: UInt = #line) {
     do { let x = try a(), y = try b(); if x == y { xctRecord("XCTAssertNotEqual failed: (\(x)) is equal to (\(y))", message(), file, line) } }
     catch { xctRecord("XCTAssertNotEqual threw \(error)", message(), file, line) }
@@ -121,4 +126,29 @@ func XCTUnwrap<T>(_ expression: @autoclosure () throws -> T?, _ message: @autocl
 @Test func SpecTests_testProjectTagsSkipGenericFoldersUnlessKnownOrRoot() throws { try SpecTests().testProjectTagsSkipGenericFoldersUnlessKnownOrRoot() }
 @Test func SpecTests_testLowConfidenceStaysUnchecked() throws { try SpecTests().testLowConfidenceStaysUnchecked() }
 @Test func SpecTests_testPackAndReportCommands() throws { try SpecTests().testPackAndReportCommands() }
+@Test func SpecTests_testSearchFilterKeepsOnlyMatchingRecords() { SpecTests().testSearchFilterKeepsOnlyMatchingRecords() }
+@Test func SpecTests_testTodayArchiveIgnoresUndoneRuns() { SpecTests().testTodayArchiveIgnoresUndoneRuns() }
+@Test func SpecTests_testLowMarkStartsUnchecked() throws { try SpecTests().testLowMarkStartsUnchecked() }
+@Test func SpecTests_testUndoDropsOnlyFoldersTheMoveCreated() throws { try SpecTests().testUndoDropsOnlyFoldersTheMoveCreated() }
+@Test func SpecTests_testPendingDeleteStartsUncheckedUnlessEveryItemIsCertain() { SpecTests().testPendingDeleteStartsUncheckedUnlessEveryItemIsCertain() }
+@Test func SpecTests_testUndoRoutingLeavesOtherWindowsAloneAndSearchSubtitleDropsDuplicateTag() { SpecTests().testUndoRoutingLeavesOtherWindowsAloneAndSearchSubtitleDropsDuplicateTag() }
+@Test func SpecTests_testPageNotesStayOnTheirPageAndAppearanceLaunchOverride() throws { try SpecTests().testPageNotesStayOnTheirPageAndAppearanceLaunchOverride() }
+@Test func DispatchTests_testPromptKeepsFilenamePathTagsAndTruncatesBody() { DispatchTests().testPromptKeepsFilenamePathTagsAndTruncatesBody() }
+@Test func DispatchTests_testSecretsAreNotSentAndImagesOrDocsAreEligible() { DispatchTests().testSecretsAreNotSentAndImagesOrDocsAreEligible() }
+@Test func DispatchTests_testJSONParsesEnvelopeAndDropsUnknownProject() { DispatchTests().testJSONParsesEnvelopeAndDropsUnknownProject() }
+@Test func DispatchTests_testRulesMatchProjectAndTypeAndEmptyRuleMatchesNothing() { DispatchTests().testRulesMatchProjectAndTypeAndEmptyRuleMatchesNothing() }
+@Test func DispatchTests_testTemplateRendersVariablesAndSendArguments() { DispatchTests().testTemplateRendersVariablesAndSendArguments() }
+@Test func DispatchTests_testRecognitionCommandAndFallbackWhenOpenClawIsDown() { DispatchTests().testRecognitionCommandAndFallbackWhenOpenClawIsDown() }
+@Test func DispatchTests_testQueueEditsSkipsAndSendsOnlyWhenAsked() { DispatchTests().testQueueEditsSkipsAndSendsOnlyWhenAsked() }
+@Test func DispatchTests_testRecognizedTextIsSearchableAndSurvivesUpsert() throws { try DispatchTests().testRecognizedTextIsSearchableAndSurvivesUpsert() }
+@Test func DispatchTests_testFirstSendToATargetIsDryRunAndCaseSensitive() { DispatchTests().testFirstSendToATargetIsDryRunAndCaseSensitive() }
+@Test func DispatchTests_testSessionsListDoesNotInventTargets() { DispatchTests().testSessionsListDoesNotInventTargets() }
+@Test func DispatchTests_testQuotaFallbackDoesNotCallTheCloudForEmptyText() { DispatchTests().testQuotaFallbackDoesNotCallTheCloudForEmptyText() }
+@Test func DispatchTests_testOpenClawAgentEnvelopeNeverStoresOuterSummary() throws { try DispatchTests().testOpenClawAgentEnvelopeNeverStoresOuterSummary() }
+@Test func DispatchTests_testSearchMergesRecognitionFieldsAndHighlightsThem() { DispatchTests().testSearchMergesRecognitionFieldsAndHighlightsThem() }
+@Test func DispatchTests_testRecognitionQuoteAndPlaceholderMessages() { DispatchTests().testRecognitionQuoteAndPlaceholderMessages() }
+@Test func DispatchTests_testSendAndRecognitionStayBehindExplicitConfirmation() throws { try DispatchTests().testSendAndRecognitionStayBehindExplicitConfirmation() }
+@Test func DispatchTests_testProjectChangeRewritesBodyAndLocalPathsStayVisible() { DispatchTests().testProjectChangeRewritesBodyAndLocalPathsStayVisible() }
+@Test func DispatchTests_testForgedBoundaryCannotEscapeAndRoutingComesFromTheRule() throws { try DispatchTests().testForgedBoundaryCannotEscapeAndRoutingComesFromTheRule() }
+@Test func DispatchTests_testSendArgvIsBuiltInCodeAndSentIndexOutlivesTheLog() throws { try DispatchTests().testSendArgvIsBuiltInCodeAndSentIndexOutlivesTheLog() }
 #endif

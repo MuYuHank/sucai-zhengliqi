@@ -18,7 +18,7 @@ public enum StateStore {
         let path = StorePaths.stateFile(library)
         if !store.exists(path) { return .fresh(now: now) }
         let state = try Persist.read(LibraryState.self, path: path, store: store)
-        if state.schema > 1 { throw OrganizerError.parse("状态文件来自更新的产物整理器") }
+        if state.schema > 1 { throw OrganizerError.parse("状态文件来自更新的\(organizerName)") }
         return state
     }
 
@@ -32,7 +32,7 @@ public enum PreferencesStore {
         let path = StorePaths.preferencesFile(home: home)
         if !store.exists(path) { return .fresh() }
         let preferences = try Persist.read(AppPreferences.self, path: path, store: store)
-        if preferences.schema > 1 { throw OrganizerError.parse("偏好设置来自更新的产物整理器") }
+        if preferences.schema > 1 { throw OrganizerError.parse("偏好设置来自更新的\(organizerName)") }
         return preferences
     }
 
@@ -52,7 +52,7 @@ public enum PlanStore {
         let file = path ?? StorePaths.planFile(library)
         guard store.exists(file) else { throw OrganizerError.io("找不到预览清单 \(file)") }
         let plan = try Persist.read(MovePlan.self, path: file, store: store)
-        if plan.schema > 1 { throw OrganizerError.parse("预览清单来自更新的产物整理器") }
+        if plan.schema > 1 { throw OrganizerError.parse("预览清单来自更新的\(organizerName)") }
         if MovePlan.fingerprint(for: plan.items) != plan.fingerprint {
             throw OrganizerError.planTampered
         }
@@ -90,7 +90,7 @@ public enum IndexStore {
         let path = StorePaths.indexFile(library)
         if !store.exists(path) { return .empty() }
         let catalog = try Persist.read(Catalog.self, path: path, store: store)
-        if catalog.schema > 1 { throw OrganizerError.parse("索引来自更新的产物整理器") }
+        if catalog.schema > 1 { throw OrganizerError.parse("索引来自更新的\(organizerName)") }
         return catalog
     }
 

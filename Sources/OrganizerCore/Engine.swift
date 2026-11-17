@@ -33,10 +33,10 @@ public struct Organizer: Sendable {
         let scanOptions = options ?? .make()
         let library = PathKey.normalize(preferences.libraryRoot)
         if preferences.libraryRoot.isEmpty {
-            return finish(items: [], issues: [issue(library.isEmpty ? "/" : library, "还没有设置产物库")], library: library, now: now)
+            return finish(items: [], issues: [issue(library.isEmpty ? "/" : library, "还没有设置素材库")], library: library, now: now)
         }
         if Safety.isProtected(library) {
-            return finish(items: [], issues: [issue(library, "产物库不能放在系统目录里")], library: library, now: now)
+            return finish(items: [], issues: [issue(library, "素材库不能放在系统目录里")], library: library, now: now)
         }
         var files: [DiscoveredFile] = []
         var issues: [ScanIssue] = []
@@ -52,7 +52,7 @@ public struct Organizer: Sendable {
                 issues.append(issue(normalized, "扫描范围很大，建议改成「下载」或「桌面」"))
             }
             if desk == nil && PathKey.isInsideOrEqual(normalized, root: library) {
-                issues.append(issue(normalized, "扫描位置在产物库里面，已跳过"))
+                issues.append(issue(normalized, "扫描位置在素材库里面，已跳过"))
                 continue
             }
             walk(
@@ -153,7 +153,7 @@ public struct Organizer: Sendable {
         guard MovePlan.fingerprint(for: plan.items) == plan.fingerprint else { throw OrganizerError.planTampered }
         let library = PathKey.normalize(plan.libraryRoot)
         guard !library.isEmpty, library != "/" else { throw OrganizerError.missingLibrary }
-        guard !Safety.isProtected(library) else { throw OrganizerError.io("产物库不能放在系统目录里") }
+        guard !Safety.isProtected(library) else { throw OrganizerError.io("素材库不能放在系统目录里") }
         try store.createDirectory(library)
         try store.createDirectory(StorePaths.chanwuDirectory(library))
 
@@ -179,7 +179,7 @@ public struct Organizer: Sendable {
                 continue
             }
             if !PathKey.isInsideOrEqual(item.destinationPath, root: library) || item.destinationPath == library {
-                operations.append(operation(item, action: .failed, reason: "目标不在产物库内，已拒绝", from: item.sourcePath, to: item.destinationPath))
+                operations.append(operation(item, action: .failed, reason: "目标不在素材库内，已拒绝", from: item.sourcePath, to: item.destinationPath))
                 continue
             }
             if PathKey.isInsideOrEqual(item.destinationPath, root: item.sourcePath) || Safety.isProtected(item.sourcePath) || Safety.looksLikeSecret(PathKey.name(item.sourcePath)) {
@@ -191,10 +191,18 @@ public struct Organizer: Sendable {
                 continue
             }
             do {
+                let created = directoriesCreated(for: item.destinationPath, library: library)
                 let kind = try store.relocate(from: item.sourcePath, to: item.destinationPath)
                 let action: FileAction = kind == .moved ? .moved : .copiedSourceRetained
                 let reason = kind == .moved ? "已移动" : "跨卷，已复制并保留源文件"
-                operations.append(operation(item, action: action, reason: reason, from: item.sourcePath, to: item.destinationPath))
+                operations.append(operation(
+                    item,
+                    action: action,
+                    reason: reason,
+                    from: item.sourcePath,
+                    to: item.destinationPath,
+                    createdDirectories: kind == .moved ? created : []
+                ))
                 remember(item, library: library, indexedAt: now, catalog: &catalog, archive: archive)
                 changedIndex = true
             } catch {
@@ -217,7 +225,7 @@ public struct Organizer: Sendable {
         } else if dry {
             note = Copy.explicitDryRunNote
         } else {
-            note = Copy.appliedNote
+            note = Copy.appliedNote(moveOnly: request.moveOnly)
         }
 
         let record = RunRecord(
@@ -285,6 +293,7 @@ public struct Organizer: Sendable {
             do {
                 _ = try store.relocate(from: from, to: to)
                 operations.append(undone(operation, action: .undone, reason: "已移回原处", from: from, to: to))
+                removeCreatedDirectories(operation.createdDirectories ?? [], library: root)
                 if let relative = PathKey.relative(file: from, root: root) {
                     IndexStore.remove(relativePath: relative, catalog: &catalog)
                     changedIndex = true
@@ -297,7 +306,11 @@ public struct Organizer: Sendable {
         if changedIndex {
             try IndexStore.save(catalog, library: root, store: store)
         }
-        let record = undoRecord(id: undoID, now: now, library: root, original: original, note: "已按运行记录 \(runID) 尝试撤销。", operations: operations)
+        let restored = operations.filter { $0.action == .undone }.count
+        let failed = operations.filter { $0.action == .failed }.count
+        let kept = operations.filter { $0.action == .skipped }.count
+        let note = UndoSummary.sentence(restored: restored, failed: failed, keptCopies: kept, movedAt: original.finishedAt)
+        let record = undoRecord(id: undoID, now: now, library: root, original: original, note: note, operations: operations)
         try RunArchive.save(record, store: store)
         return record
     }
@@ -341,7 +354,7 @@ public struct Organizer: Sendable {
                 || child.name.hasSuffix(".xcworkspace")
         }
         if isProject {
-            issues.append(issue(directory, "这像是项目目录，源码不会移动。只会看 output、generated 这类产物文件夹"))
+            issues.append(issue(directory, "这像是项目目录，源码不会移动。只会看 output、generated 这类输出文件夹"))
             for child in children where child.isDirectory && !child.isSymlink {
                 guard Safety.outputDirectoryNames.contains(child.name.lowercased()) else { continue }
                 guard depth + 1 <= maxDepth else { continue }
@@ -456,7 +469,7 @@ public struct Organizer: Sendable {
                 continue
             }
             if PathKey.isInsideOrEqual(file.path, root: library) {
-                items.append(move(id: id, file: file, identification: identification, destination: file.path, disposition: .blocked, reason: "已在产物库中"))
+                items.append(move(id: id, file: file, identification: identification, destination: file.path, disposition: .blocked, reason: "已在素材库中"))
                 continue
             }
             let allowed = PlanGate.allows(identification, state: state)
@@ -542,8 +555,46 @@ public struct Organizer: Sendable {
         ScanIssue(id: String(SHA256.hex(Data((path + message).utf8)).prefix(12)), path: path, message: message)
     }
 
-    private func operation(_ item: PlannedMove, action: FileAction, reason: String, from: String, to: String) -> RunOperation {
-        RunOperation(id: item.id, source: from, destination: to, action: action, reason: reason, bytes: item.bytes, sourceTool: item.source, kind: item.kind)
+    private func operation(
+        _ item: PlannedMove,
+        action: FileAction,
+        reason: String,
+        from: String,
+        to: String,
+        createdDirectories: [String] = []
+    ) -> RunOperation {
+        var operation = RunOperation(id: item.id, source: from, destination: to, action: action, reason: reason, bytes: item.bytes, sourceTool: item.source, kind: item.kind)
+        if !createdDirectories.isEmpty { operation.createdDirectories = createdDirectories }
+        return operation
+    }
+
+    private func directoriesCreated(for destination: String, library: String) -> [String] {
+        var created: [String] = []
+        var current = PathKey.parent(PathKey.normalize(destination))
+        let root = PathKey.normalize(library)
+        let chanwu = StorePaths.chanwuDirectory(root)
+        while current != root && current != "/" && PathKey.isInsideOrEqual(current, root: root) {
+            if PathKey.isInsideOrEqual(current, root: chanwu) || current == chanwu { break }
+            if store.exists(current) { break }
+            created.append(current)
+            let next = PathKey.parent(current)
+            if next == current { break }
+            current = next
+        }
+        return created
+    }
+
+    private func removeCreatedDirectories(_ paths: [String], library: String) {
+        let root = PathKey.normalize(library)
+        let chanwu = StorePaths.chanwuDirectory(root)
+        for path in paths {
+            let key = PathKey.normalize(path)
+            guard key != root, key != "/", PathKey.isInsideOrEqual(key, root: root) else { continue }
+            guard !PathKey.isInsideOrEqual(key, root: chanwu) else { continue }
+            guard store.exists(key) else { continue }
+            guard (try? store.children(of: key))?.isEmpty == true else { continue }
+            try? store.removeEmptyDirectory(key)
+        }
     }
 
     private func undone(_ operation: RunOperation, action: FileAction, reason: String, from: String, to: String) -> RunOperation {
@@ -683,7 +734,8 @@ public struct Organizer: Sendable {
                 evidence: item.identification.evidence + [item.reason],
                 disposition: item.disposition,
                 reason: item.reason,
-                meta: item.meta
+                meta: item.meta,
+                deskSlot: item.slot.rawValue
             )
         }
         return finish(items: items, issues: issues + result.issues, library: library, now: now)
@@ -694,10 +746,10 @@ public enum ReportText {
     public static func plan(_ plan: MovePlan) -> String {
         var lines: [String] = []
         lines.append("\(organizerName) \(organizerVersion)")
-        lines.append("产物库：\(plan.libraryRoot)")
+        lines.append("素材库：\(plan.libraryRoot)")
         lines.append("可移动：\(plan.proposed.count)")
         lines.append("待确认：\(plan.optionalItems.count)")
-        lines.append("已拦住：\(plan.blocked.count)")
+        lines.append("不移动：\(plan.blocked.count)")
         lines.append("问题：\(plan.issues.count)")
         lines.append("")
         if !plan.proposed.isEmpty {
@@ -730,7 +782,7 @@ public enum ReportText {
         let rehearsed = record.operations.filter { $0.action == .wouldMove }.count
         let undone = record.operations.filter { $0.action == .undone }.count
         var counts = "演练 \(rehearsed)，移动 \(moved)，跨卷复制 \(copied)，失败 \(failed)"
-        if undone > 0 { counts += "，撤回 \(undone)" }
+        if undone > 0 { counts += "，撤销 \(undone)" }
         return [
             "运行 \(record.id)",
             "模式：\(modeName(record.mode))",

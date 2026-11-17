@@ -282,6 +282,8 @@ public enum PublishImport {
 }
 
 public enum OAuthEndpoints {
+    public static let callbackURL = "http://127.0.0.1:8765/callback"
+
     public static func authorizeURL(platform: PublishPlatform, clientID: String, redirect: String, state: String) -> String {
         let id = encode(clientID)
         let back = encode(redirect)
@@ -493,6 +495,12 @@ public struct SpaceReport: Equatable, Sendable {
     public var largest: [SpaceItem]
     public var reclaimable: [SpaceItem]
     public var reclaimableBytes: Int64
+
+    public init(largest: [SpaceItem], reclaimable: [SpaceItem], reclaimableBytes: Int64) {
+        self.largest = largest
+        self.reclaimable = reclaimable
+        self.reclaimableBytes = reclaimableBytes
+    }
 }
 
 public struct ReportFile: Equatable, Sendable {
@@ -576,12 +584,12 @@ public enum WeeklyReports {
         let published = files.filter { $0.publishStatus == "published" && inWeek($0.indexedAt ?? $0.modifiedAt) }.count
         let pending = files.filter { $0.publishStatus == "pending" }.count
         let markdown = """
-        # 产物整理器周报
+        # \(organizerName)周报
 
         周起始：\(ReportSchedule.fileName(start, calendar: calendar).replacingOccurrences(of: ".md", with: ""))
 
-        - 本周产出：\(produced)
-        - 本周归档：\(archived)
+        - 本周产出：\(produced)（这些文件的修改时间在本周）
+        - 本周归档：\(archived)（这些文件是本周放进库里的）
         - 本周发布：\(published)
         - 仍待发布：\(pending)
 

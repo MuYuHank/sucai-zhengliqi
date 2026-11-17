@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 用 Swift Package Manager 和系统自带的 codesign 打出 产物整理器.app。
+# 用 Swift Package Manager 和系统自带的 codesign 打出 素材整理器.app。
 # 不调用 xcodebuild，不需要完整的 Xcode，只要 Command Line Tools 里的 swift。
 # macOS 自带的 bash 是 3.2，这个脚本刻意不使用 bash 4 的语法。
 
@@ -21,7 +21,7 @@ INSTALL_DIR="${INSTALL_DIR:-/Applications}"
 usage() {
   cat <<'EOF'
 用法：
-  ./scripts/make_app.sh              构建 dist/产物整理器.app
+  ./scripts/make_app.sh              构建 dist/素材整理器.app
   ./scripts/make_app.sh --debug      用 debug 配置构建
   ./scripts/make_app.sh --install    构建并复制到 /Applications
   ./scripts/make_app.sh --open       构建后用 open 启动
@@ -75,11 +75,50 @@ if [[ ! -x "$BIN" ]]; then
   exit 1
 fi
 
-APP="$ROOT/dist/产物整理器.app"
+APP="$ROOT/dist/素材整理器.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/ChanwuApp"
 chmod 755 "$APP/Contents/MacOS/ChanwuApp"
+
+ICON_SRC="$ROOT/Resources/AppIcon-1024.png"
+ICONSET_SRC="$ROOT/Resources/AppIcon.iconset"
+if [[ ! -f "$ICON_SRC" ]]; then
+  echo "找不到应用图标：$ICON_SRC" >&2
+  exit 1
+fi
+if ! command -v iconutil >/dev/null 2>&1; then
+  echo "需要 iconutil（Command Line Tools 自带）来生成 AppIcon.icns。" >&2
+  exit 1
+fi
+ICONSET="$APP/Contents/Resources/AppIcon.iconset"
+mkdir -p "$ICONSET"
+# 尺寸是预先画好的，避免 sips 在缩放时给底边加一条杂色。缺文件时才用 sips。
+place_icon() {
+  size="$1"
+  name="$2"
+  if [[ -f "$ICONSET_SRC/$name" ]]; then
+    cp "$ICONSET_SRC/$name" "$ICONSET/$name"
+    return
+  fi
+  if ! command -v sips >/dev/null 2>&1; then
+    echo "缺少 $ICONSET_SRC/$name，而且没有 sips。" >&2
+    exit 1
+  fi
+  sips -z "$size" "$size" "$ICON_SRC" --out "$ICONSET/$name" >/dev/null
+}
+place_icon 16 icon_16x16.png
+place_icon 32 icon_16x16@2x.png
+place_icon 32 icon_32x32.png
+place_icon 64 icon_32x32@2x.png
+place_icon 128 icon_128x128.png
+place_icon 256 icon_128x128@2x.png
+place_icon 256 icon_256x256.png
+place_icon 512 icon_256x256@2x.png
+place_icon 512 icon_512x512.png
+place_icon 1024 icon_512x512@2x.png
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
+rm -rf "$ICONSET"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -95,9 +134,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>Chanwu</string>
+  <string>素材整理器</string>
   <key>CFBundleDisplayName</key>
-  <string>产物整理器</string>
+  <string>素材整理器</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
@@ -122,7 +163,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSHumanReadableCopyright</key>
-  <string>本地整理工具。不联网，不删除文件。</string>
+  <string>本地整理工具。不删除文件。平台同步只在你明确操作时发生。</string>
 </dict>
 </plist>
 PLIST
@@ -140,14 +181,14 @@ else
   echo "警告：没有 codesign，应用未签名。macOS 可能拒绝启动。" >&2
 fi
 
-ZIP="$ROOT/dist/产物整理器.zip"
+ZIP="$ROOT/dist/素材整理器.zip"
 rm -f "$ZIP"
 if command -v ditto >/dev/null 2>&1; then
   ditto -c -k --keepParent "$APP" "$ZIP"
 elif command -v zip >/dev/null 2>&1; then
-  (cd "$ROOT/dist" && zip -r -y "产物整理器.zip" "产物整理器.app")
+  (cd "$ROOT/dist" && zip -r -y "素材整理器.zip" "素材整理器.app")
 else
-  echo "警告：没有 ditto 或 zip，没有生成 产物整理器.zip。" >&2
+  echo "警告：没有 ditto 或 zip，没有生成 素材整理器.zip。" >&2
 fi
 
 echo "已生成：$APP"
@@ -157,7 +198,7 @@ fi
 echo "直接运行裸的 swift build 二进制没有包标识，菜单栏、热键和隐私权限都会不稳定。请打开这个 .app。"
 
 if [[ "$INSTALL" -eq 1 ]]; then
-  DEST="$INSTALL_DIR/产物整理器.app"
+  DEST="$INSTALL_DIR/素材整理器.app"
   mkdir -p "$INSTALL_DIR"
   rm -rf "$DEST"
   cp -R "$APP" "$DEST"

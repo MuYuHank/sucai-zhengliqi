@@ -15,76 +15,9 @@ enum FolderPicker {
         panel.allowsMultipleSelection = false
         panel.canCreateDirectories = true
         panel.prompt = prompt
-        panel.message = "选好之后仍要先看预览。产物整理器不会删除文件。"
+        panel.message = "选好之后仍要先看预览。素材整理器不会删除文件。"
         guard panel.runModal() == .OK else { return nil }
         return panel.url?.path
-    }
-}
-
-@MainActor
-final class StatusBarController: NSObject {
-    static let shared = StatusBarController()
-    private var item: NSStatusItem?
-
-    func install() {
-        guard item == nil else { return }
-        NSApp.setActivationPolicy(.accessory)
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.toolTip = "产物整理器"
-        self.item = item
-        refresh(pending: 0, today: 0)
-    }
-
-    func refresh(pending: Int, today: Int) {
-        guard let item else { return }
-        item.button?.title = pending > 0 ? "产物 \(pending)" : "产物"
-        let menu = NSMenu()
-        let todayItem = NSMenuItem(title: "今日归档 \(today)", action: #selector(openWindow), keyEquivalent: "")
-        todayItem.target = self
-        menu.addItem(todayItem)
-        let pendingItem = NSMenuItem(title: "待确认 \(pending)", action: #selector(openWindow), keyEquivalent: "")
-        pendingItem.target = self
-        menu.addItem(pendingItem)
-        let search = NSMenuItem(title: "打开搜索", action: #selector(search), keyEquivalent: "f")
-        search.target = self
-        menu.addItem(search)
-        let scan = NSMenuItem(title: "扫描", action: #selector(scan), keyEquivalent: "r")
-        scan.target = self
-        menu.addItem(scan)
-        let undo = NSMenuItem(title: "撤回上次", action: #selector(undoLast), keyEquivalent: "")
-        undo.target = self
-        menu.addItem(undo)
-        menu.addItem(.separator())
-        let open = NSMenuItem(title: "打开窗口", action: #selector(openWindow), keyEquivalent: "o")
-        open.target = self
-        menu.addItem(open)
-        let quit = NSMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q")
-        quit.target = self
-        menu.addItem(quit)
-        item.menu = menu
-    }
-
-    @objc private func openWindow() {
-        Task { @MainActor in AppRuntime.model?.showWindow() }
-    }
-
-    @objc private func search() {
-        Task { @MainActor in AppRuntime.model?.presentSearch() }
-    }
-
-    @objc private func undoLast() {
-        Task { @MainActor in AppRuntime.model?.undoLast() }
-    }
-
-    @objc private func scan() {
-        Task { @MainActor in
-            AppRuntime.model?.showWindow()
-            AppRuntime.model?.beginScan()
-        }
-    }
-
-    @objc private func quit() {
-        NSApp.terminate(nil)
     }
 }
 
@@ -216,6 +149,19 @@ struct KeychainStore: SecureStore, Sendable {
             throw OrganizerError.io("钥匙串读取失败（\(status)）")
         }
         return item as? Data
+    }
+
+    /// 打开设置时只看令牌条目是否存在，不读取内容，避免每次打开设置都弹钥匙串密码框。
+    func contains(account: String) -> Bool {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var item: CFTypeRef?
+        return SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess
     }
 
     func write(account: String, data: Data) throws {

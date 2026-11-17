@@ -1,7 +1,7 @@
 public import Foundation
 
 public let organizerVersion = "1.1.0"
-public let organizerName = "产物整理器"
+public let organizerName = "素材整理器"
 
 public enum Limits {
     public static let sniffBytes = 128 * 1024
@@ -17,10 +17,25 @@ public enum Limits {
 public enum Copy {
     public static let firstRunNote = "首次运行为演练，未移动任何文件。确认清单无误后，再运行一次才会真正移动。"
     public static let explicitDryRunNote = "这次是演练，未移动任何文件。"
-    public static let appliedNote = "已按确认结果移动文件。可以用这条记录撤销。跨卷的文件只复制，源文件仍留在原地。"
-    public static let neverDeletes = "本工具不会删除文件。同卷用 rename 移动；跨卷只复制并保留源文件。撤销也不会删除副本。"
+    public static func appliedNote(moveOnly: Bool) -> String {
+        if moveOnly {
+            return "已按确认结果移动文件。可以用这条记录撤销。在其他磁盘上的文件留在原处，没有复制。"
+        }
+        return "已按确认结果移动文件。可以用这条记录撤销。跨卷的文件只复制，源文件仍留在原地。"
+    }
+
+    public static var appliedNote: String { appliedNote(moveOnly: true) }
+
+    public static func neverDeletes(moveOnly: Bool) -> String {
+        if moveOnly {
+            return "本工具不会删除文件。同一块磁盘上直接移动；在其他磁盘上的文件会留在原处，不会复制。撤销也不会删除文件。"
+        }
+        return "本工具不会删除文件。同一块磁盘上直接移动；其他磁盘上的文件只复制并保留源文件。撤销也不会删除副本。"
+    }
+
+    public static var neverDeletes: String { neverDeletes(moveOnly: true) }
     public static let undoEmpty = "这条记录里没有可以撤销的移动。"
-    public static let undoCopyKept = "跨卷副本已留在产物库。撤销不会删除文件，源文件本来就还在。"
+    public static let undoCopyKept = "跨卷副本已留在素材库。撤销不会删除文件，源文件本来就还在。"
     public static let undoMissing = "目标已不在原处，没有改动其余文件。"
     public static let undoConflict = "原路径已被占用，为避免覆盖，这个文件没有移回。"
 }
@@ -45,7 +60,7 @@ public enum OrganizerError: Error, Equatable, Sendable, CustomStringConvertible 
         case .missingRun(let id):
             return "找不到运行记录 \(id)。"
         case .missingLibrary:
-            return "还没有设置产物库。"
+            return "还没有设置素材库。"
         case .io(let message):
             return message
         case .parse(let message):
@@ -212,6 +227,8 @@ public struct PlannedMove: Codable, Equatable, Sendable, Identifiable {
     public var disposition: Disposition
     public var reason: String
     public var meta: ItemMeta? = nil
+    /// 桌面结构里的槽位。旧清单没有这个字段时保持 nil，界面再按目标路径判断。
+    public var deskSlot: String? = nil
 
     public var destinationRelative: String {
         destinationPath
@@ -257,6 +274,28 @@ public struct ItemMeta: Codable, Equatable, Sendable {
     }
 }
 
+public enum PreviewSelection {
+    /// 待删默认不勾。只有这一组全部是置信度 ≥ 90% 的渲染帧、缓存或日志时才预先勾上。
+    public static let autoDeleteConfidence = 0.90
+    public static let autoDeleteClasses: Set<String> = ["renderFrame", "cache", "log"]
+    /// 界面上标成「低」的项（低于 75%）默认不勾，即使它仍是建议移动。
+    public static let lowConfidence = 0.75
+
+    public static func initialIDs(_ items: [PlannedMove]) -> Set<String> {
+        let proposed = items.filter { $0.disposition == .proposed }
+        let deletes = proposed.filter { $0.deskSlot == DeskSlot.pendingDelete.rawValue }
+        let others = proposed.filter { item in
+            item.deskSlot != DeskSlot.pendingDelete.rawValue
+                && item.confidence + 0.000_000_1 >= lowConfidence
+        }
+        let autoDelete = !deletes.isEmpty && deletes.allSatisfy { item in
+            item.confidence + 0.000_000_1 >= autoDeleteConfidence
+                && autoDeleteClasses.contains(item.meta?.contentClass ?? "")
+        }
+        return Set((autoDelete ? others + deletes : others).map(\.id))
+    }
+}
+
 public struct MovePlan: Codable, Equatable, Sendable {
     public var schema: Int
     public var fingerprint: String
@@ -269,7 +308,7 @@ public struct MovePlan: Codable, Equatable, Sendable {
     public var optionalItems: [PlannedMove] { items.filter { $0.disposition == .optional } }
     public var blocked: [PlannedMove] { items.filter { $0.disposition == .blocked } }
     /// 预览默认勾选的文件。置信度低于阈值的待确认项不在这里。
-    public var preselectedIDs: Set<String> { Set(proposed.map(\.id)) }
+    public var preselectedIDs: Set<String> { PreviewSelection.initialIDs(items) }
 
     public static func fingerprint(for items: [PlannedMove]) -> String {
         let lines = items.map { item in
@@ -295,6 +334,8 @@ public struct RunOperation: Codable, Equatable, Sendable, Identifiable {
     public var bytes: Int64
     public var sourceTool: SourceTool
     public var kind: MediaKind
+    /// 这次移动新建的目录，从最深到最浅。撤销时只删除其中已经空了的，不碰事先就存在的文件夹。旧记录没有这个字段。
+    public var createdDirectories: [String]? = nil
 }
 
 public struct RunRecord: Codable, Equatable, Sendable, Identifiable {
@@ -366,6 +407,8 @@ public struct AppPreferences: Codable, Equatable, Sendable {
     public var maxDepth: Int
     public var watchEnabled: Bool
     public var userRules: [UserRule]
+    /// nil 跟随系统。light / dark 是这次选择的外观，不是钥匙串。
+    public var appearance: String? = nil
 
     public static func fresh() -> AppPreferences {
         AppPreferences(
@@ -376,8 +419,97 @@ public struct AppPreferences: Codable, Equatable, Sendable {
             includeUnidentifiedMedia: false,
             maxDepth: Limits.maxDepthDefault,
             watchEnabled: false,
-            userRules: []
+            userRules: [],
+            appearance: nil
         )
+    }
+}
+
+public enum AppearanceChoice: String, Codable, Sendable, Equatable {
+    case system
+    case light
+    case dark
+
+    public static func parse(_ raw: String?) -> AppearanceChoice {
+        switch raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "light": return .light
+        case "dark": return .dark
+        default: return .system
+        }
+    }
+
+    /// `-SucaiAppearance dark|light`。其它值当作没传。
+    public static func launchOverride(arguments: [String]) -> AppearanceChoice? {
+        guard let index = arguments.firstIndex(of: "-SucaiAppearance") else { return nil }
+        let next = arguments.index(after: index)
+        guard arguments.indices.contains(next) else { return nil }
+        switch arguments[next].lowercased() {
+        case "dark": return .dark
+        case "light": return .light
+        default: return nil
+        }
+    }
+
+    public static func resolve(saved: String?, arguments: [String]) -> AppearanceChoice {
+        if let override = launchOverride(arguments: arguments) { return override }
+        return parse(saved)
+    }
+}
+
+/// 工具栏状态按页面分开。预览里的移动说明不会跟着出现在空间或周报。
+public struct PageNotes: Equatable, Sendable {
+    public var values: [String: String]
+    public init(values: [String: String] = [:]) { self.values = values }
+    public mutating func set(_ text: String, page: String) { values[page] = text }
+    public func text(for page: String) -> String { values[page] ?? "" }
+
+    /// 撤销之后，待整理不再留着「可以用这条记录撤销」。
+    public func afterUndo(preview: String, note: String) -> PageNotes {
+        var copy = self
+        copy.set(note, page: preview)
+        return copy
+    }
+}
+
+public enum SidebarAnnouncement {
+    public static func label(title: String, badge: Int, unit: String? = nil) -> String {
+        guard badge > 0 else { return title }
+        if let unit, !unit.isEmpty { return "\(title)，\(badge) \(unit)" }
+        return "\(title)，\(badge)"
+    }
+}
+
+public enum UndoRoute: Equatable, Sendable {
+    /// 当前窗口的撤销栈（文本、删除规则，以及第一响应者自己的撤销）。
+    case windowAction
+    /// 主窗口是 key，而且这个窗口没有别的可撤销操作时，才撤销文件移动。
+    case fileMove
+    case none
+}
+
+public enum UndoRouting {
+    public static func undo(responderCanUndo: Bool, windowCanUndo: Bool, keyWindowIsMain: Bool) -> UndoRoute {
+        if responderCanUndo || windowCanUndo { return .windowAction }
+        if keyWindowIsMain { return .fileMove }
+        return .none
+    }
+
+    public static func redo(responderCanRedo: Bool, windowCanRedo: Bool) -> UndoRoute {
+        if responderCanRedo || windowCanRedo { return .windowAction }
+        return .none
+    }
+}
+
+public enum SearchRowText {
+    /// 文件夹名和项目标签相同时只写一次。搜索里的「产品 › FCCV1 · FCCV1」就是这个。
+    public static func subtitle(category: String, folder: String, projectTag: String, when: String) -> String {
+        let place = folder.isEmpty || folder == category ? category : "\(category) › \(folder)"
+        var parts = [place]
+        if !projectTag.isEmpty && projectTag != folder {
+            parts.append(projectTag)
+        }
+        if !when.isEmpty { parts.append(when) }
+        return parts.joined(separator: " · ")
     }
 }
 
@@ -653,6 +785,32 @@ public enum Calendars {
     }
 }
 
+public enum UndoSummary {
+    public static func sentence(restored: Int, failed: Int, keptCopies: Int, movedAt: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = TimeZone(identifier: "Asia/Shanghai")
+        formatter.dateFormat = "M月d日 HH:mm"
+        let stamp = formatter.string(from: movedAt)
+        var pieces = ["\(stamp) 的移动里，已把 \(restored) 个文件移回原处"]
+        if failed > 0 { pieces.append("\(failed) 个没能移回") }
+        if keptCopies > 0 { pieces.append("\(keptCopies) 个是留在其他磁盘上的副本，没有删除") }
+        return pieces.joined(separator: "，") + "。"
+    }
+}
+
+public enum RunStats {
+    public static func movedToday(runs: [RunRecord], now: Date, calendar: Calendar = Calendars.shanghai()) -> (count: Int, bytes: Int64) {
+        let undone = Set(runs.compactMap(\.undoOfRunID))
+        let operations = runs.filter { record in
+            record.mode == .applied
+                && !undone.contains(record.id)
+                && calendar.isDate(record.finishedAt, inSameDayAs: now)
+        }.flatMap(\.operations).filter { $0.action == .moved }
+        return (operations.count, operations.reduce(Int64(0)) { $0 + $1.bytes })
+    }
+}
+
 public enum ByteFormat {
     public static func string(bytes: Int64) -> String {
         let units = ["B", "KB", "MB", "GB", "TB"]
@@ -755,6 +913,10 @@ public enum StorePaths {
         PathKey.joining(PathKey.joining(home, ".chanwu"), "preferences.json")
     }
 
+    public static func distributionFile(home: String) -> String {
+        PathKey.joining(PathKey.joining(home, ".chanwu"), "distribution.json")
+    }
+
     public static func sealedDirectory(home: String) -> String {
         PathKey.joining(PathKey.joining(home, ".chanwu"), "sealed")
     }
@@ -782,6 +944,7 @@ public protocol FileStore: Sendable {
     func readFile(_ path: String, maxBytes: Int) throws -> Data
     func writeFile(_ path: String, data: Data) throws
     func createDirectory(_ path: String) throws
+    func removeEmptyDirectory(_ path: String) throws
     func exists(_ path: String) -> Bool
     func sameVolume(_ pathA: String, _ pathB: String) -> Bool
     func relocate(from source: String, to destination: String) throws -> RelocateKind

@@ -1,5 +1,5 @@
 // swift-tools-version: 6.0
-// 产物整理器
+// 素材整理器
 // OrganizerCore 与命令行在 Linux 和 macOS 上都能编译。
 // OrganizerApp 只用 SwiftUI / AppKit / FSEvents / Carbon / AVFoundation / Security，
 // 因此只在 macOS 上加入包。Linux 上 `swift test` 不会编译这些文件。

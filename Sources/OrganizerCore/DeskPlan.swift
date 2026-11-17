@@ -113,7 +113,7 @@ public struct DeskConfig: Codable, Equatable, Sendable {
     }
 
     public func reservedTopLevels() -> Set<String> {
-        var names: Set<String> = ["产物整理器报告", ".chanwu"]
+        var names: Set<String> = [DefaultLocations.reportFolderName, DefaultLocations.legacyReportFolderName, ".chanwu"]
         for slot in DeskSlot.allCases where slot != .product {
             if let top = relative(for: slot).split(separator: "/").first {
                 names.insert(String(top))
@@ -128,20 +128,34 @@ public enum DefaultLocations {
         PathKey.joining(home, "Desktop")
     }
 
+    /// 新写的周报目录。旧版目录名仍留在 reservedTopLevels，避免已经生成的文件夹被再次扫描。
+    public static let reportFolderName = "素材整理器报告"
+    public static let legacyReportFolderName = "产物整理器报告"
+
     public static func reportDirectory(desktop: String) -> String {
-        PathKey.joining(desktop, "产物整理器报告")
+        PathKey.joining(desktop, reportFolderName)
     }
 
+    public static let everydayNames = ["Downloads", "Desktop", "Documents", "Projects"]
+    public static let developmentNames = [".codex", ".cursor", "Developer"]
+
     public static func scanRoots(home: String) -> [String] {
-        [
-            PathKey.joining(home, "Downloads"),
-            PathKey.joining(home, "Desktop"),
-            PathKey.joining(home, "Documents"),
-            PathKey.joining(home, ".codex"),
-            PathKey.joining(home, "Projects"),
-            PathKey.joining(home, "Developer"),
-            PathKey.joining(home, ".cursor"),
-        ]
+        (everydayNames + developmentNames).map { PathKey.joining(home, $0) }
+    }
+
+    /// 常用目录在前，开发目录在后。其余位置保持传入的顺序，不按路径字母排序。
+    public static func orderedScanRoots(_ roots: [String], home: String) -> [String] {
+        let preferred = scanRoots(home: home)
+        var seen = Set<String>()
+        var incoming: [String] = []
+        for root in roots {
+            let path = PathKey.normalize(root)
+            guard !path.isEmpty, seen.insert(path).inserted else { continue }
+            incoming.append(path)
+        }
+        let head = preferred.filter { incoming.contains($0) }
+        let tail = incoming.filter { !preferred.contains($0) }
+        return head + tail
     }
 }
 
@@ -227,10 +241,7 @@ public enum ProjectTags {
     public static func isGeneric(_ name: String) -> Bool {
         let lowered = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if lowered.count < 2 || lowered.hasPrefix(".") { return true }
-        if generic.contains(lowered) { return true }
-        if lowered.contains("fixture") { return true }
-        if lowered == "chanwu" || lowered.hasPrefix("chanwu-") || lowered.hasPrefix("chanwu_") { return true }
-        return false
+        return generic.contains(lowered)
     }
 
     public static func detect(path: String, name: String, extra: [String], roots: Set<String> = []) -> String {
@@ -496,6 +507,7 @@ public struct DeskPlanItem: Equatable, Sendable {
     public var modifiedAt: Date
     public var identification: Identification
     public var confidence: Double
+    public var slot: DeskSlot
     public var disposition: Disposition
     public var reason: String
     public var meta: ItemMeta
@@ -530,7 +542,7 @@ public enum FileClassifier {
             return Classification(content: .cache, usefulness: .probablyUseless, confidence: 0.9, reasons: ["位于缓存目录"], projectTag: tag, version: version)
         }
         if isSEO(lowered, ext: ext) {
-            return Classification(content: .seoDocument, usefulness: .useful, confidence: 0.88, reasons: ["像是 SEO / GEO 产物"], projectTag: tag, version: version)
+            return Classification(content: .seoDocument, usefulness: .useful, confidence: 0.88, reasons: ["像是 SEO / GEO 素材"], projectTag: tag, version: version)
         }
         if ["html", "css", "js", "mjs"].contains(ext) {
             return Classification(content: .webPage, usefulness: .useful, confidence: 0.8, reasons: ["网页文件"], projectTag: tag, version: version)
@@ -753,6 +765,7 @@ public enum DeskPlanner {
                 modifiedAt: draft.file.modifiedAt,
                 identification: draft.file.identification,
                 confidence: draft.classification.confidence,
+                slot: draft.slot,
                 disposition: disposition,
                 reason: reason,
                 meta: meta
@@ -819,7 +832,7 @@ public enum DeskStore {
         let path = StorePaths.deskFile(home: home)
         if !store.exists(path) { return .standard() }
         let config = try Persist.read(DeskConfig.self, path: path, store: store)
-        if config.schema > 1 { throw OrganizerError.parse("桌面结构配置来自更新的产物整理器") }
+        if config.schema > 1 { throw OrganizerError.parse("桌面结构配置来自更新的\(organizerName)") }
         return config
     }
 
